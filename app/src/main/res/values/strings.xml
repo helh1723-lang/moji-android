@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">默迹</string>
+    <string name="accessibility_description">仅在微信和支付宝支付相关页面中提取金额、商户与成功状态，在本机生成账单；不会点击页面、代替支付或上传内容。</string>
+    <string name="capture_feedback_title">✓  已记入默迹</string>
+    <string name="capture_feedback_detail">%1$s    ¥%2$.2f</string>
+</resources>

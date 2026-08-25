@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+.idea/
+local.properties
+**/build/
+captures/
+artifacts/
+*.apk
+*.aab
+*.db
+*.db-wal
+*.db-shm
+debug-capture.jsonl
+*.jks
+*.keystore
