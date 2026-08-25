@@ -19,8 +19,10 @@ class MojiAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val consent = AtomicBoolean(false)
     private lateinit var processor: CaptureProcessor
+    private val embeddedSessionStore by lazy { EmbeddedPaymentSessionStore(this) }
     private var settingsJob: Job? = null
     private val pendingSubmissions = mutableMapOf<Int, Job>()
+    private val lastEmbeddedWindowScanAt = mutableMapOf<String, Long>()
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -33,7 +35,11 @@ class MojiAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (!consent.get()) return
         val packageName = event?.packageName?.toString() ?: return
-        if (packageName !in ALLOWED_PACKAGES) return
+        if (packageName !in CaptureSources.accessibilityPackages) return
+        if (CaptureSources.isEmbeddedPaymentHost(packageName)) {
+            observeEmbeddedPaymentHost(event, packageName)
+            return
+        }
         val root = rootInActiveWindow ?: return
         val texts = ArrayList<String>(32)
         collectTexts(root, texts, depth = 0, budget = intArrayOf(160, 2_000))
@@ -71,6 +77,88 @@ class MojiAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun observeEmbeddedPaymentHost(event: AccessibilityEvent, packageName: String) {
+        val root = rootInActiveWindow
+        val receivedAt = System.currentTimeMillis()
+        val eventWindowId = event.windowId
+        val rootWindowId = root?.windowId
+        val eventType = event.eventType
+        val eventClassName = event.className?.toString()
+        val texts = ArrayList<String>(64)
+        val sharedBudget = intArrayOf(240, 3_000)
+        event.text.mapNotNullTo(texts) { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }
+        event.contentDescription?.toString()?.trim()?.takeIf(String::isNotEmpty)?.let(texts::add)
+        event.source?.let { collectTexts(it, texts, depth = 0, budget = sharedBudget) }
+        if (root != null && root != event.source) {
+            collectTexts(root, texts, depth = 0, budget = sharedBudget)
+        }
+        var scannedWindowCount = 0
+        var matchingWindowCount = 0
+        val shouldScanWindows = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+            receivedAt - (lastEmbeddedWindowScanAt[packageName] ?: 0L) >= EMBEDDED_WINDOW_SCAN_INTERVAL_MS
+        if (shouldScanWindows && sharedBudget[0] > 0 && sharedBudget[1] > 0) {
+            lastEmbeddedWindowScanAt[packageName] = receivedAt
+            windows.take(MAX_INTERACTIVE_WINDOWS).forEach { window ->
+                scannedWindowCount += 1
+                val windowRoot = window.root ?: return@forEach
+                val windowPackage = windowRoot.packageName?.toString()
+                if (windowPackage != packageName && windowPackage != CaptureSources.ALIPAY_PACKAGE) return@forEach
+                matchingWindowCount += 1
+                collectTexts(windowRoot, texts, depth = 0, budget = sharedBudget)
+            }
+        }
+        val distinctTexts = texts.distinct().take(64)
+        val hasPaymentHint = hasEmbeddedCheckoutEvidence(distinctTexts)
+        EmbeddedPaymentSessionTracker.observeHost(
+            packageName = packageName,
+            observedAt = receivedAt,
+            strongCheckoutEvidence = hasPaymentHint
+        )
+        if (hasPaymentHint) {
+            embeddedSessionStore.save(EmbeddedPaymentSession(packageName, receivedAt, true))
+        }
+        val windowKey = eventWindowId
+        pendingSubmissions.remove(windowKey)?.cancel()
+        pendingSubmissions[windowKey] = serviceScope.launch {
+            delay(EMBEDDED_OBSERVATION_SETTLE_DELAY_MS)
+            pendingSubmissions.remove(windowKey)
+            DebugCaptureSampler.recordSourceObservation(
+                context = this@MojiAccessibilityService,
+                packageName = packageName,
+                source = "ACCESSIBILITY",
+                texts = distinctTexts,
+                eventWindowId = eventWindowId,
+                rootWindowId = rootWindowId,
+                accessibilityEventType = eventType,
+                eventClassName = eventClassName,
+                scannedWindowCount = scannedWindowCount,
+                matchingWindowCount = matchingWindowCount,
+                resultCode = when {
+                    root == null -> "EMBEDDED_HOST_ROOT_UNAVAILABLE"
+                    distinctTexts.isEmpty() -> "EMBEDDED_HOST_EMPTY_TREE"
+                    hasPaymentHint -> "EMBEDDED_PAYMENT_HINT_OBSERVED"
+                    else -> "EMBEDDED_HOST_EVENT_NO_HINT"
+                }
+            )
+            if (hasPaymentHint) {
+                processor.submit(
+                    PaymentSnapshot(
+                        packageName = packageName,
+                        texts = distinctTexts,
+                        receivedAt = receivedAt,
+                        source = "ACCESSIBILITY",
+                        pageInstanceHash = LocalPaymentParser.sha256(
+                            "$packageName|$rootWindowId|${distinctTexts.take(32).joinToString("|")}"
+                        ),
+                        eventWindowId = eventWindowId,
+                        rootWindowId = rootWindowId,
+                        accessibilityEventType = eventType
+                    )
+                )
+            }
+        }
+    }
+
     private fun collectTexts(node: AccessibilityNodeInfo, output: MutableList<String>, depth: Int, budget: IntArray) {
         if (depth > 12 || budget[0]-- <= 0 || budget[1] <= 0) return
         val value = node.text?.toString()?.trim().orEmpty()
@@ -97,6 +185,7 @@ class MojiAccessibilityService : AccessibilityService() {
         settingsJob?.cancel()
         pendingSubmissions.values.forEach(Job::cancel)
         pendingSubmissions.clear()
+        lastEmbeddedWindowScanAt.clear()
         if (::processor.isInitialized) processor.close()
         serviceScope.cancel()
         super.onDestroy()
@@ -108,8 +197,10 @@ class MojiAccessibilityService : AccessibilityService() {
 
         fun connectedInstance(): MojiAccessibilityService? = connectedService?.get()
 
-        private val ALLOWED_PACKAGES = setOf("com.tencent.mm", "com.eg.android.AlipayGphone")
         private val PAYMENT_HINTS = listOf("支付", "付款", "收款", "交易", "退款", "转账")
         private const val PAGE_SETTLE_DELAY_MS = 650L
+        private const val EMBEDDED_OBSERVATION_SETTLE_DELAY_MS = 350L
+        private const val EMBEDDED_WINDOW_SCAN_INTERVAL_MS = 500L
+        private const val MAX_INTERACTIVE_WINDOWS = 12
     }
 }
