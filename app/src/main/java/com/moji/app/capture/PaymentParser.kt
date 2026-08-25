@@ -15,7 +15,8 @@ data class PaymentSnapshot(
     val pageInstanceHash: String,
     val eventWindowId: Int? = null,
     val rootWindowId: Int? = null,
-    val accessibilityEventType: Int? = null
+    val accessibilityEventType: Int? = null,
+    val sourceEventId: String? = null
 )
 
 data class ParsedPayment(
@@ -42,7 +43,7 @@ interface PaymentParser {
 class LocalPaymentParser(
     private val platform: Platform,
     private val packageName: String,
-    override val version: String = "local-v2"
+    override val version: String = "local-v3"
 ) : PaymentParser {
     override fun supports(snapshot: PaymentSnapshot) = snapshot.packageName == packageName
 
@@ -86,8 +87,12 @@ class LocalPaymentParser(
             else -> "PARSED"
         }
         val dedupe = if (amount != null && paymentRelevant) {
-            val bucket = snapshot.receivedAt / 30_000L
-            sha256("${platform.name}|${direction?.name ?: "UNKNOWN"}|$amount|${normalize(merchant)}|$bucket")
+            val captureIdentity = snapshot.sourceEventId
+                ?.let { "source:$it" }
+                ?: "bucket:${snapshot.receivedAt / 30_000L}"
+            sha256(
+                "${platform.name}|${direction?.name ?: "UNKNOWN"}|$amount|${normalize(merchant)}|$captureIdentity"
+            )
         } else null
         return ParsedPayment(
             platform = platform,
@@ -108,7 +113,9 @@ class LocalPaymentParser(
     private fun findAmounts(texts: List<String>): List<Long> = texts.flatMap { text ->
         AMOUNT_REGEX.findAll(text).mapNotNull { match ->
             runCatching {
-                BigDecimal(match.groupValues[1])
+                val amountText = match.groupValues.drop(1).firstOrNull(String::isNotEmpty)
+                    ?: return@runCatching null
+                BigDecimal(amountText)
                     .setScale(2, RoundingMode.UNNECESSARY)
                     .movePointRight(2)
                     .longValueExact()
@@ -150,7 +157,10 @@ class LocalPaymentParser(
 
     companion object {
         const val SOURCE_NOTIFICATION = "NOTIFICATION"
-        private val AMOUNT_REGEX = Regex("(?:[¥￥]\\s*|金额[:：]?\\s*)([0-9]{1,9}(?:\\.[0-9]{1,2})?)")
+        private val AMOUNT_REGEX = Regex(
+            "(?:[¥￥]\\s*|金额[:：]?\\s*)([0-9]{1,9}(?:\\.[0-9]{1,2})?)|" +
+                "([0-9]{1,9}(?:\\.[0-9]{1,2})?)\\s*元"
+        )
         private val SUCCESS_WORDS = listOf("支付成功", "付款成功", "交易成功", "已支付")
         private val FAILURE_WORDS = listOf("支付失败", "付款失败", "已取消", "余额不足")
         private val TRANSFER_WORDS = listOf("转账", "转入", "转出")
@@ -176,7 +186,9 @@ class LocalPaymentParser(
 class ParserRegistry {
     private val parsers: List<PaymentParser> = listOf(
         LocalPaymentParser(Platform.WECHAT, "com.tencent.mm"),
-        LocalPaymentParser(Platform.ALIPAY, "com.eg.android.AlipayGphone")
+        LocalPaymentParser(Platform.ALIPAY, "com.eg.android.AlipayGphone"),
+        LocalPaymentParser(Platform.ALIPAY, CaptureSources.TAOBAO_PACKAGE),
+        LocalPaymentParser(Platform.ALIPAY, CaptureSources.IDLEFISH_PACKAGE)
     )
 
     fun parse(snapshot: PaymentSnapshot): ParsedPayment? = parsers.firstOrNull { it.supports(snapshot) }?.parse(snapshot)

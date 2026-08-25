@@ -6,5 +6,5 @@
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_description"
     android:notificationTimeout="250"
-    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone"
+    android:packageNames="com.tencent.mm,com.eg.android.AlipayGphone,com.taobao.taobao,com.taobao.idlefish"
     android:settingsActivity="com.moji.app.MainActivity" />
