@@ -2,6 +2,8 @@
 .gradle/
 .idea/
 local.properties
+signing.properties
+.release-signing/
 **/build/
 captures/
 artifacts/

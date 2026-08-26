@@ -181,6 +181,7 @@ class MojiAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() = Unit
     override fun onDestroy() {
+        CaptureFeedback.dismissFor(this)
         if (connectedService?.get() === this) connectedService = null
         settingsJob?.cancel()
         pendingSubmissions.values.forEach(Job::cancel)

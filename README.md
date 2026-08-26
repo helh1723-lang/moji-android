@@ -4,11 +4,13 @@
 
 ## 当前版本
 
-- 版本：`1.0`（versionCode 1）
+- 版本：`1.1.0`（versionCode 2）
 - 最低 Android：7.0（API 24）
 - 目标 Android：API 35
 - 已完成华为真机链路验证：微信支付通知识别、未知商户自动入账、支付后悬浮卡片
 - 悬浮卡片支持原地修改金额、商户和分类，以及撤销自动入账
+- 账本支持时间、平台、来源、状态组合筛选和月份左右滑动
+- 商户分类规则支持新增、查看、编辑、停用和删除
 
 ## 隐私边界
 
@@ -31,6 +33,15 @@ APK 输出位置：
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+正式 Release 构建需要仓库外部的签名配置。将环境变量 `MOJI_SIGNING_PROPERTIES` 指向包含
+`storeFile`、`storePassword`、`keyAlias`、`keyPassword` 的本地属性文件，然后运行：
+
+```powershell
+.\gradlew-d.bat testReleaseUnitTest lintRelease assembleRelease --no-daemon
+```
+
+签名密钥和属性文件不得提交到仓库。
+
 也可以使用标准 Gradle Wrapper；首次构建前需自行配置 Android SDK 的 `local.properties`，该文件不会提交到仓库。
 
 ## 从 GitHub 恢复
@@ -51,3 +62,7 @@ cd moji-android
 ## 安全提醒
 
 无障碍与通知访问均属于高敏感权限。安装后请只在理解用途并同意隐私披露的情况下开启；应用不会代替用户点击或发起支付。
+
+## 开源许可证
+
+本项目采用 [MIT License](LICENSE)。

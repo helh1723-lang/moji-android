@@ -2,6 +2,7 @@ package com.moji.app.capture
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -40,6 +41,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.lang.ref.WeakReference
 
 internal fun parseQuickAmountMinor(value: String): Long? = runCatching {
     BigDecimal(value.trim())
@@ -51,7 +53,7 @@ internal fun parseQuickAmountMinor(value: String): Long? = runCatching {
 object CaptureFeedback {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var activeOverlay: ActiveOverlay? = null
+    private var activeOverlay: WeakReference<ActiveOverlay>? = null
 
     fun show(context: Context, transaction: TransactionEntity, categories: List<CategoryEntity>) {
         mainHandler.post {
@@ -59,6 +61,12 @@ object CaptureFeedback {
                 ?: MojiAccessibilityService.connectedInstance()
             val shown = overlayService != null && showAccessibilityCard(overlayService, transaction, categories)
             if (!shown) showNotification(context, transaction, categories)
+        }
+    }
+
+    fun dismissFor(service: AccessibilityService) {
+        mainHandler.post {
+            currentOverlay()?.takeIf { it.root.context === service }?.let { dismissOverlay() }
         }
     }
 
@@ -100,7 +108,7 @@ object CaptureFeedback {
         val manager = service.getSystemService(WindowManager::class.java)
         manager.addView(root, params)
         val overlay = ActiveOverlay(manager, root, params)
-        activeOverlay = overlay
+        activeOverlay = WeakReference(overlay)
         renderSummary(service, overlay, card, transaction, categories, palette)
         scheduleClose(overlay, CARD_DURATION_MS)
         true
@@ -252,7 +260,7 @@ object CaptureFeedback {
                         )
                     }
                     mainHandler.post {
-                        if (activeOverlay !== overlay) return@post
+                        if (currentOverlay() !== overlay) return@post
                         result.onSuccess {
                             hideKeyboard(service, amountInput)
                             setOverlayFocusable(service, overlay, false)
@@ -269,7 +277,7 @@ object CaptureFeedback {
         })
         amountInput.requestFocus()
         mainHandler.postDelayed({
-            if (activeOverlay === overlay) {
+            if (currentOverlay() === overlay) {
                 service.getSystemService(InputMethodManager::class.java)
                     .showSoftInput(amountInput, InputMethodManager.SHOW_IMPLICIT)
             }
@@ -298,6 +306,7 @@ object CaptureFeedback {
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "自动记账结果", NotificationManager.IMPORTANCE_HIGH).apply {
                     description = "支付完成后的自动记账结果"
+                    lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                     setSound(null, null)
                     enableVibration(false)
                 }
@@ -315,12 +324,22 @@ object CaptureFeedback {
         )
         val merchant = transaction.merchantRaw ?: "未知商户"
         val categoryName = categories.firstOrNull { it.id == transaction.categoryId }?.name ?: "其他"
+        val publicNotification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(context.getString(R.string.capture_feedback_title).trimStart('✓', ' '))
+            .setContentText(context.getString(R.string.capture_feedback_private_detail))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSilent(true)
+            .build()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(context.getString(R.string.capture_feedback_title).trimStart('✓', ' '))
             .setContentText(context.getString(R.string.capture_feedback_detail, merchant, transaction.amountMinor / 100.0))
             .setSubText("$categoryName · ${platformLabel(transaction.platform)}")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification)
             .setContentIntent(editIntent)
             .addAction(0, "撤销", undoIntent)
             .addAction(0, "修改", editIntent)
@@ -385,7 +404,7 @@ object CaptureFeedback {
     private fun scheduleClose(overlay: ActiveOverlay, delayMs: Long) {
         cancelClose(overlay)
         overlay.closeRunnable = Runnable {
-            if (activeOverlay === overlay) dismissOverlay()
+            if (currentOverlay() === overlay) dismissOverlay()
         }.also { mainHandler.postDelayed(it, delayMs) }
     }
 
@@ -399,12 +418,14 @@ object CaptureFeedback {
     }
 
     private fun dismissOverlay() {
-        val overlay = activeOverlay ?: return
+        val overlay = currentOverlay() ?: return
         cancelClose(overlay)
         hideKeyboard(overlay.root.context, overlay.root)
         runCatching { overlay.manager.removeView(overlay.root) }
         activeOverlay = null
     }
+
+    private fun currentOverlay(): ActiveOverlay? = activeOverlay?.get()
 
     private fun hideKeyboard(context: Context, view: View) {
         context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0)
