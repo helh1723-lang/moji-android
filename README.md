@@ -39,17 +39,18 @@ Room 本地账本、统计、预算与导出
 
 ## 当前版本
 
-- 版本：`1.1.2`（versionCode 4）
+- 版本：`1.1.3`（versionCode 5）
 - 最低 Android：7.0（API 24）
 - 目标 Android：API 35
 - 已完成华为真机链路验证：微信支付通知识别、未知商户自动入账、支付后悬浮卡片
 - 悬浮卡片支持原地修改金额、商户和分类，以及撤销自动入账
 - 账本支持时间、平台、来源、状态组合筛选和月份左右滑动
 - 商户分类规则支持新增、查看、编辑、停用和删除
+- **1.1.3 修复**：修正了 Release 构建（R8 混淆）误删 Lifecycle 反射入口导致的启动崩溃——此前发布的 Release 包因此无法启动，请升级到 1.1.3。
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/helh1723-lang/moji-android/releases/latest) 下载正式签名 APK。首次使用前请阅读应用内的权限说明；从早期 Debug 签名版本迁移时，需要先导出备份。
+从 [GitHub Releases](https://github.com/helh1723-lang/moji-android/releases/latest) 下载正式签名 APK。如果你之前下载的旧版 Release 包**无法启动或闪退**，那是 R8 混淆导致的崩溃，请升级到 **v1.1.3** 再试。首次使用前请阅读应用内的权限说明；从早期 Debug 签名版本迁移时，需要先导出备份。
 
 ## 隐私边界
 
