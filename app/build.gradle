@@ -31,8 +31,8 @@ android {
         applicationId 'com.moji.app'
         minSdk 24
         targetSdk 35
-        versionCode 3
-        versionName '1.1.1'
+        versionCode 4
+        versionName '1.1.2'
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
@@ -130,6 +130,18 @@ tasks.register('copyDebugMainClasses', Copy) {
     into mojiAsciiTestDir
     rename { 'moji-debug-main.jar' }
 }
+tasks.register('jarReleaseUnitTestClasses', Jar) {
+    dependsOn 'compileReleaseUnitTestKotlin'
+    from "$buildDir/tmp/kotlin-classes/releaseUnitTest"
+    archiveFileName = 'moji-release-tests.jar'
+    destinationDirectory = mojiAsciiTestDir
+}
+tasks.register('copyReleaseMainClasses', Copy) {
+    dependsOn 'bundleReleaseClassesToRuntimeJar'
+    from "$buildDir/intermediates/runtime_app_classes_jar/release/bundleReleaseClassesToRuntimeJar/classes.jar"
+    into mojiAsciiTestDir
+    rename { 'moji-release-main.jar' }
+}
 afterEvaluate {
     tasks.named('testDebugUnitTest').configure {
         dependsOn 'jarDebugUnitTestClasses', 'copyDebugMainClasses'
@@ -137,6 +149,15 @@ afterEvaluate {
             classpath = files(
                 new File(mojiAsciiTestDir, 'moji-debug-tests.jar'),
                 new File(mojiAsciiTestDir, 'moji-debug-main.jar')
+            ) + classpath.filter { !it.absolutePath.startsWith(buildDir.absolutePath) }
+        }
+    }
+    tasks.named('testReleaseUnitTest').configure {
+        dependsOn 'jarReleaseUnitTestClasses', 'copyReleaseMainClasses'
+        doFirst {
+            classpath = files(
+                new File(mojiAsciiTestDir, 'moji-release-tests.jar'),
+                new File(mojiAsciiTestDir, 'moji-release-main.jar')
             ) + classpath.filter { !it.absolutePath.startsWith(buildDir.absolutePath) }
         }
     }
