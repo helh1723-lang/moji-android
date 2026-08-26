@@ -13,6 +13,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import java.util.concurrent.ConcurrentHashMap
 
 internal fun determineCandidateStatus(snapshot: PaymentSnapshot, parsed: ParsedPayment): CandidateStatus? = when {
@@ -32,18 +34,37 @@ class CaptureProcessor(private val context: Context) {
     private val registry = ParserRegistry()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recentPages = ConcurrentHashMap<String, Long>()
+    private val queue = Channel<PaymentSnapshot>(
+        capacity = SNAPSHOT_QUEUE_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
 
-    fun submit(snapshot: PaymentSnapshot) {
-        val previous = recentPages.put(snapshot.pageInstanceHash, snapshot.receivedAt)
-        if (previous != null && snapshot.receivedAt - previous < SAME_PAGE_SUPPRESSION_MS) return
-        recentPages.entries.removeIf { snapshot.receivedAt - it.value > PAGE_CACHE_RETENTION_MS }
-        scope.launch {
-            if (snapshot.source == LocalPaymentParser.SOURCE_NOTIFICATION) delay(NOTIFICATION_FALLBACK_DELAY_MS)
-            process(snapshot)
+    init {
+        repeat(SNAPSHOT_WORKERS) {
+            scope.launch {
+                for (snapshot in queue) {
+                    if (snapshot.source == LocalPaymentParser.SOURCE_NOTIFICATION) delay(NOTIFICATION_FALLBACK_DELAY_MS)
+                    process(snapshot)
+                }
+            }
         }
     }
 
-    fun close() = scope.cancel()
+    fun submit(snapshot: PaymentSnapshot) {
+        val now = System.currentTimeMillis()
+        val previous = recentPages.put(snapshot.pageInstanceHash, now)
+        if (previous != null && now - previous < SAME_PAGE_SUPPRESSION_MS) return
+        recentPages.entries.removeIf { now - it.value > PAGE_CACHE_RETENTION_MS }
+        if (recentPages.size > MAX_RECENT_PAGES) {
+            recentPages.entries.sortedBy { it.value }.take(recentPages.size - MAX_RECENT_PAGES).forEach { recentPages.remove(it.key, it.value) }
+        }
+        queue.trySend(snapshot)
+    }
+
+    fun close() {
+        queue.close()
+        scope.cancel()
+    }
 
     private suspend fun process(snapshot: PaymentSnapshot) {
         val parsed = registry.parse(snapshot) ?: return
@@ -114,5 +135,8 @@ class CaptureProcessor(private val context: Context) {
         private const val PAGE_CACHE_RETENTION_MS = 30_000L
         private const val NOTIFICATION_FALLBACK_DELAY_MS = 1_200L
         private const val CAPTURE_EVENT_RETENTION_MS = 14L * 24 * 60 * 60 * 1000
+        private const val SNAPSHOT_QUEUE_CAPACITY = 64
+        private const val SNAPSHOT_WORKERS = 1
+        private const val MAX_RECENT_PAGES = 256
     }
 }

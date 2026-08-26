@@ -10,11 +10,15 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface MojiDao {
-    @Query("SELECT * FROM transactions WHERE deletedAt IS NULL ORDER BY occurredAt DESC")
-    fun observeTransactions(): Flow<List<TransactionEntity>>
+    @Query("""SELECT * FROM transactions WHERE deletedAt IS NULL
+        AND occurredAt BETWEEN :after AND :before ORDER BY occurredAt DESC""")
+    fun observeTransactionsBetween(after: Long, before: Long): Flow<List<TransactionEntity>>
 
-    @Query("SELECT * FROM transactions ORDER BY occurredAt DESC")
-    suspend fun allTransactionsForBackup(): List<TransactionEntity>
+    @Query("SELECT COUNT(*) FROM transactions")
+    suspend fun transactionCountForBackup(): Int
+
+    @Query("SELECT * FROM transactions ORDER BY occurredAt DESC LIMIT :limit OFFSET :offset")
+    suspend fun transactionBatchForBackup(limit: Int, offset: Int): List<TransactionEntity>
 
     @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1")
     suspend fun transactionById(id: String): TransactionEntity?
@@ -89,8 +93,20 @@ interface MojiDao {
     @Query("SELECT * FROM merchant_rules WHERE enabled = 1 ORDER BY priority DESC, updatedAt DESC")
     suspend fun enabledRules(): List<MerchantRuleEntity>
 
+    @Query("SELECT * FROM merchant_rules ORDER BY enabled DESC, priority DESC, updatedAt DESC")
+    fun observeRules(): Flow<List<MerchantRuleEntity>>
+
+    @Query("SELECT * FROM merchant_rules WHERE id = :id LIMIT 1")
+    suspend fun ruleById(id: String): MerchantRuleEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertRule(rule: MerchantRuleEntity)
+
+    @Query("UPDATE merchant_rules SET enabled = :enabled, updatedAt = :now WHERE id = :id")
+    suspend fun setRuleEnabled(id: String, enabled: Boolean, now: Long = System.currentTimeMillis())
+
+    @Query("DELETE FROM merchant_rules WHERE id = :id")
+    suspend fun deleteRule(id: String)
 
     @Query("SELECT * FROM budgets")
     suspend fun allBudgets(): List<BudgetEntity>
@@ -130,6 +146,10 @@ interface MojiDao {
 
     @Query("DELETE FROM capture_events WHERE retentionUntil < :now")
     suspend fun pruneCaptureEvents(now: Long)
+
+    @Query("""DELETE FROM transaction_candidates
+        WHERE status NOT IN ('PENDING_REVIEW', 'DETECTED', 'COLLECTING') AND updatedAt < :before""")
+    suspend fun pruneTerminalCandidates(before: Long)
 
     @Transaction
     suspend fun postCandidate(candidate: TransactionCandidateEntity, transaction: TransactionEntity, event: CaptureEventEntity) {

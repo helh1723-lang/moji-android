@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -45,10 +46,12 @@ import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.FileDownload
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PrivacyTip
 import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.automirrored.outlined.Rule
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SettingsAccessibility
 import androidx.compose.material3.AlertDialog
@@ -57,6 +60,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -76,9 +81,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -92,6 +99,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
@@ -106,8 +114,11 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.core.app.NotificationManagerCompat
 import com.moji.app.data.CategoryEntity
 import com.moji.app.data.Direction
+import com.moji.app.data.MerchantRuleEntity
+import com.moji.app.data.Platform
 import com.moji.app.data.TransactionEntity
 import com.moji.app.data.TransactionCandidateEntity
+import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.data.TransactionStatus
 import kotlinx.coroutines.launch
@@ -117,6 +128,8 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.Calendar
+import kotlin.math.abs
 
 private enum class MainTab(val label: String) { LEDGER("账本"), STATS("统计"), PROFILE("我的") }
 
@@ -183,12 +196,16 @@ private fun MainShell(
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val budgets by viewModel.budgets.collectAsStateWithLifecycle()
-    val allRows by viewModel.allRows.collectAsStateWithLifecycle()
+    val yearRows by viewModel.yearRows.collectAsStateWithLifecycle()
+    val currentMonthRows by viewModel.currentMonthRows.collectAsStateWithLifecycle()
+    val filters by viewModel.filters.collectAsStateWithLifecycle()
+    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val message by viewModel.operationMessage.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableStateOf(MainTab.LEDGER) }
     var editing by remember { mutableStateOf<TransactionEntity?>(null) }
     var showEditor by rememberSaveable { mutableStateOf(false) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
+    var showFilters by rememberSaveable { mutableStateOf(false) }
     var refunding by remember { mutableStateOf<TransactionEntity?>(null) }
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -197,10 +214,9 @@ private fun MainShell(
         message?.let { snackbar.showSnackbar(it); viewModel.clearMessage() }
     }
 
-    LaunchedEffect(editTransactionId, allRows) {
+    LaunchedEffect(editTransactionId) {
         val requested = editTransactionId ?: return@LaunchedEffect
-        val transaction = allRows.firstOrNull { it.transaction.id == requested }?.transaction
-            ?: return@LaunchedEffect
+        val transaction = viewModel.transactionById(requested) ?: return@LaunchedEffect
         tab = MainTab.LEDGER
         editing = transaction
         showEditor = true
@@ -256,18 +272,32 @@ private fun MainShell(
                     ui = ui,
                     budgetMinor = budgets.firstOrNull { it.categoryId == null }?.limitMinor,
                     showSearch = showSearch,
+                    searchQuery = searchQuery,
                     onSearchToggle = { showSearch = !showSearch; if (!showSearch) viewModel.setQuery("") },
                     onQuery = viewModel::setQuery,
+                    activeFilterCount = filters.activeCount,
+                    onOpenFilters = { showFilters = true },
                     onPreviousMonth = viewModel::previousMonth,
                     onNextMonth = viewModel::nextMonth,
                     onAdd = { editing = null; showEditor = true },
                     onOpen = { editing = it; showEditor = true },
                     modifier = screenModifier
                 )
-                MainTab.STATS -> StatsScreen(ui, allRows, screenModifier)
+                MainTab.STATS -> StatsScreen(currentMonthRows, yearRows, screenModifier)
                 MainTab.PROFILE -> ProfileScreen(viewModel, screenModifier)
             }
         }
+    }
+
+    if (showFilters) {
+        LedgerFilterSheet(
+            filters = filters,
+            monthStart = ui.monthStart,
+            monthEnd = ui.monthEnd,
+            onDismiss = { showFilters = false },
+            onApply = { viewModel.setFilters(it); showFilters = false },
+            onClear = { viewModel.clearFilters(); showFilters = false }
+        )
     }
 
     if (showEditor) {
@@ -308,8 +338,11 @@ private fun LedgerScreen(
     ui: LedgerUiState,
     budgetMinor: Long?,
     showSearch: Boolean,
+    searchQuery: String,
     onSearchToggle: () -> Unit,
     onQuery: (String) -> Unit,
+    activeFilterCount: Int,
+    onOpenFilters: () -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
     onAdd: () -> Unit,
@@ -319,8 +352,22 @@ private fun LedgerScreen(
     val monthFormat = remember { SimpleDateFormat("yyyy 年 M 月", Locale.CHINA) }
     val dayFormat = remember { SimpleDateFormat("M 月 d 日 · EEEE", Locale.CHINA) }
     val grouped = ui.rows.groupBy { startOfDay(it.transaction.occurredAt) }
+    var horizontalDrag by remember { mutableFloatStateOf(0f) }
     LazyColumn(
-        modifier.fillMaxSize().statusBarsPadding(),
+        modifier.fillMaxSize().statusBarsPadding().pointerInput(ui.monthStart) {
+            detectHorizontalDragGestures(
+                onDragStart = { horizontalDrag = 0f },
+                onHorizontalDrag = { _, amount -> horizontalDrag += amount },
+                onDragEnd = {
+                    when {
+                        horizontalDrag > 80f -> onPreviousMonth()
+                        horizontalDrag < -80f -> onNextMonth()
+                    }
+                    horizontalDrag = 0f
+                },
+                onDragCancel = { horizontalDrag = 0f }
+            )
+        },
         contentPadding = PaddingValues(bottom = 32.dp)
     ) {
         item {
@@ -337,11 +384,31 @@ private fun LedgerScreen(
                 )
                 IconButton(onClick = onNextMonth) { Icon(Icons.Outlined.ChevronRight, "下个月") }
                 IconButton(onClick = onSearchToggle) { Icon(Icons.Outlined.Search, "搜索账单") }
+                IconButton(onClick = onOpenFilters) {
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        Icon(Icons.Outlined.FilterList, if (activeFilterCount == 0) "筛选账单" else "筛选账单，已启用 $activeFilterCount 类筛选")
+                        if (activeFilterCount > 0) {
+                            Text(
+                                activeFilterCount.toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(8.dp)).padding(horizontal = 4.dp)
+                            )
+                        }
+                    }
+                }
                 IconButton(onClick = onAdd) { Icon(Icons.Outlined.Add, "手动记账") }
+            }
+            if (activeFilterCount > 0) {
+                TextButton(onClick = onOpenFilters, modifier = Modifier.padding(horizontal = 12.dp)) {
+                    Icon(Icons.Outlined.FilterList, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("已启用 $activeFilterCount 类筛选")
+                }
             }
             if (showSearch) {
                 OutlinedTextField(
-                    value = ui.query, onValueChange = onQuery, singleLine = true,
+                    value = searchQuery, onValueChange = onQuery, singleLine = true,
                     placeholder = { Text("商户、分类、备注或金额") },
                     leadingIcon = { Icon(Icons.Outlined.Search, null) },
                     shape = RoundedCornerShape(14.dp),
@@ -399,6 +466,145 @@ private fun LedgerScreen(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LedgerFilterSheet(
+    filters: LedgerFilters,
+    monthStart: Long,
+    monthEnd: Long,
+    onDismiss: () -> Unit,
+    onApply: (LedgerFilters) -> Unit,
+    onClear: () -> Unit
+) {
+    var working by remember(filters) { mutableStateOf(filters) }
+    var pickingStart by remember { mutableStateOf<Boolean?>(null) }
+    val dateFormat = remember { SimpleDateFormat("M 月 d 日", Locale.CHINA) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 32.dp)
+        ) {
+            Text("筛选账单", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("筛选仅作用于当前月份，左右滑动仍可切月。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(20.dp))
+            Text("时间", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { pickingStart = true }, modifier = Modifier.weight(1f).height(48.dp)) {
+                    Text(working.dateFrom?.let(dateFormat::format) ?: "起始日期")
+                }
+                OutlinedButton(onClick = { pickingStart = false }, modifier = Modifier.weight(1f).height(48.dp)) {
+                    Text(working.dateTo?.let(dateFormat::format) ?: "结束日期")
+                }
+            }
+            if (working.dateFrom != null || working.dateTo != null) {
+                TextButton(onClick = { working = working.copy(dateFrom = null, dateTo = null) }) { Text("清除时间范围") }
+            }
+            FilterSection("平台", Platform.entries.map { it.name to platformFilterLabel(it.name) }, working.platforms) {
+                working = working.copy(platforms = toggleSelection(working.platforms, it))
+            }
+            FilterSection("来源", TransactionSource.entries.map { it.name to sourceFilterLabel(it.name) }, working.sources) {
+                working = working.copy(sources = toggleSelection(working.sources, it))
+            }
+            FilterSection(
+                "状态",
+                listOf(
+                    TransactionStatus.ACTIVE.name to "正常",
+                    TransactionStatus.PARTIALLY_REFUNDED.name to "部分退款",
+                    TransactionStatus.FULLY_REFUNDED.name to "全额退款",
+                    TransactionStatus.REFUND.name to "退款记录"
+                ),
+                working.statuses
+            ) { working = working.copy(statuses = toggleSelection(working.statuses, it)) }
+            Spacer(Modifier.height(20.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onClear, modifier = Modifier.weight(1f).height(52.dp)) { Text("全部清除") }
+                Button(
+                    onClick = {
+                        val normalized = if (working.dateFrom != null && working.dateTo != null && working.dateFrom!! > working.dateTo!!) {
+                            working.copy(dateFrom = working.dateTo, dateTo = working.dateFrom)
+                        } else working
+                        onApply(normalized)
+                    },
+                    modifier = Modifier.weight(1f).height(52.dp)
+                ) { Text("应用筛选") }
+            }
+        }
+    }
+
+    pickingStart?.let { isStart ->
+        val initial = if (isStart) working.dateFrom ?: monthStart else working.dateTo ?: monthEnd
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = pickerMillisForLocalDate(initial))
+        DatePickerDialog(
+            onDismissRequest = { pickingStart = null },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickerState.selectedDateMillis?.let { selected ->
+                        val bounds = localDayBoundsFromPicker(selected)
+                        working = if (isStart) working.copy(dateFrom = bounds.first.coerceIn(monthStart, monthEnd))
+                        else working.copy(dateTo = bounds.second.coerceIn(monthStart, monthEnd))
+                    }
+                    pickingStart = null
+                }) { Text("确定") }
+            },
+            dismissButton = { TextButton(onClick = { pickingStart = null }) { Text("取消") } }
+        ) { DatePicker(state = pickerState) }
+    }
+}
+
+@Composable
+private fun FilterSection(
+    title: String,
+    options: List<Pair<String, String>>,
+    selected: Set<String>,
+    onToggle: (String) -> Unit
+) {
+    Spacer(Modifier.height(20.dp))
+    Text(title, style = MaterialTheme.typography.titleSmall)
+    Spacer(Modifier.height(8.dp))
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        options.forEach { (value, label) ->
+            FilterChip(selected = value in selected, onClick = { onToggle(value) }, label = { Text(label) })
+        }
+    }
+}
+
+private fun toggleSelection(values: Set<String>, value: String): Set<String> =
+    if (value in values) values - value else values + value
+
+private fun platformFilterLabel(value: String): String = when (value) {
+    Platform.WECHAT.name -> "微信"
+    Platform.ALIPAY.name -> "支付宝"
+    Platform.MANUAL.name -> "手动"
+    Platform.IMPORT.name -> "导入"
+    else -> "其他"
+}
+
+private fun sourceFilterLabel(value: String): String = when (value) {
+    TransactionSource.AUTO.name -> "自动识别"
+    TransactionSource.MANUAL.name -> "手动记录"
+    else -> "导入"
+}
+
+private fun pickerMillisForLocalDate(value: Long): Long {
+    val local = Calendar.getInstance().apply { timeInMillis = value }
+    return Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+        clear()
+        set(local.get(Calendar.YEAR), local.get(Calendar.MONTH), local.get(Calendar.DAY_OF_MONTH))
+    }.timeInMillis
+}
+
+private fun localDayBoundsFromPicker(value: Long): Pair<Long, Long> {
+    val utc = Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply { timeInMillis = value }
+    val local = Calendar.getInstance().apply {
+        clear()
+        set(utc.get(Calendar.YEAR), utc.get(Calendar.MONTH), utc.get(Calendar.DAY_OF_MONTH))
+    }
+    val start = local.timeInMillis
+    local.add(Calendar.DAY_OF_MONTH, 1)
+    return start to (local.timeInMillis - 1)
 }
 
 @Composable
@@ -543,10 +749,10 @@ private fun RefundDialog(original: TransactionEntity, onDismiss: () -> Unit, onS
 }
 
 @Composable
-private fun StatsScreen(ui: LedgerUiState, allRows: List<TransactionWithCategory>, modifier: Modifier = Modifier) {
+private fun StatsScreen(monthRows: List<TransactionWithCategory>, yearRows: List<TransactionWithCategory>, modifier: Modifier = Modifier) {
     var yearly by rememberSaveable { mutableStateOf(false) }
     val yearStart = remember { java.util.Calendar.getInstance().apply { set(java.util.Calendar.DAY_OF_YEAR, 1); set(java.util.Calendar.HOUR_OF_DAY,0);set(java.util.Calendar.MINUTE,0);set(java.util.Calendar.SECOND,0);set(java.util.Calendar.MILLISECOND,0) }.timeInMillis }
-    val periodRows = if (yearly) allRows.filter { it.transaction.occurredAt >= yearStart } else ui.rows
+    val periodRows = if (yearly) yearRows.filter { it.transaction.occurredAt >= yearStart } else monthRows
     val valid = periodRows.filter { it.transaction.includeInStats }
     val expenses = valid.filter { it.transaction.direction == Direction.EXPENSE.name }
     val refunds = valid.filter { it.transaction.status == TransactionStatus.REFUND.name }
@@ -666,10 +872,12 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val budgets by viewModel.budgets.collectAsStateWithLifecycle()
     val pending by viewModel.pendingCandidates.collectAsStateWithLifecycle()
+    val rules by viewModel.rules.collectAsStateWithLifecycle()
     var showConsent by remember { mutableStateOf(false) }
     var showBudget by remember { mutableStateOf(false) }
     var showBackupWarning by remember { mutableStateOf(false) }
     var showCategories by remember { mutableStateOf(false) }
+    var showRules by remember { mutableStateOf(false) }
     var accessibilityEnabled by remember { mutableStateOf(false) }
     var notificationEnabled by remember { mutableStateOf(false) }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let { viewModel.writeBackup(context.contentResolver, it) } }
@@ -714,6 +922,7 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
         }
         item { SectionTitle("账本") }
         item { SettingRow(Icons.Outlined.Category, "分类管理", "新增分类或隐藏不常用分类") { showCategories = true } }
+        item { SettingRow(Icons.AutoMirrored.Outlined.Rule, "商户分类规则", if (rules.isEmpty()) "未设置规则" else "${rules.count { it.enabled }} 条启用 · 共 ${rules.size} 条") { showRules = true } }
         item { SettingRow(Icons.Outlined.AccountBalanceWallet, "预算", budgets.firstOrNull { it.categoryId == null }?.let { "总预算 ${money(it.limitMinor)} · ${budgets.size - 1} 个分类预算" } ?: "未设置") { showBudget = true } }
         item { SectionTitle("数据") }
         item { SettingRow(Icons.Outlined.Backup, "创建完整备份", "未加密，请妥善保管") { showBackupWarning = true } }
@@ -779,6 +988,16 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
             onHidden = viewModel::setCategoryHidden
         )
     }
+    if (showRules) {
+        MerchantRuleManagerSheet(
+            rules = rules,
+            categories = ui.categories.filterNot { it.hidden },
+            onDismiss = { showRules = false },
+            onSave = viewModel::saveRule,
+            onEnabled = viewModel::setRuleEnabled,
+            onDelete = viewModel::deleteRule
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -811,6 +1030,147 @@ private fun CategoryManagerSheet(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MerchantRuleManagerSheet(
+    rules: List<MerchantRuleEntity>,
+    categories: List<CategoryEntity>,
+    onDismiss: () -> Unit,
+    onSave: (String?, String, String, String) -> Unit,
+    onEnabled: (String, Boolean) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    var editing by remember { mutableStateOf<MerchantRuleEntity?>(null) }
+    var creating by remember { mutableStateOf(false) }
+    var deleting by remember { mutableStateOf<MerchantRuleEntity?>(null) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        LazyColumn(Modifier.fillMaxWidth(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 36.dp)) {
+            item {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("商户分类规则", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+                        Text("用户规则优先于默认分类，可随时停用或删除。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Button(onClick = { creating = true }, modifier = Modifier.height(48.dp)) {
+                        Icon(Icons.Outlined.Add, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("新增")
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+            }
+            if (rules.isEmpty()) {
+                item {
+                    Text("还没有商户规则。你也可以在编辑账单时选择“记住这次分类”。", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 28.dp))
+                }
+            } else {
+                items(rules, key = { it.id }) { rule ->
+                    val category = categories.firstOrNull { it.id == rule.categoryId }
+                    Row(
+                        Modifier.fillMaxWidth().clickable { editing = rule }.padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(rule.pattern, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${ruleMatchLabel(rule.matchType)} → ${category?.let { "${it.icon} ${it.name}" } ?: "已隐藏分类"}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(checked = rule.enabled, onCheckedChange = { onEnabled(rule.id, it) })
+                        IconButton(onClick = { editing = rule }) { Icon(Icons.Outlined.Edit, "编辑规则") }
+                        IconButton(onClick = { deleting = rule }) { Icon(Icons.Outlined.Delete, "删除规则", tint = MaterialTheme.colorScheme.error) }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                }
+            }
+        }
+    }
+    if (creating || editing != null) {
+        MerchantRuleEditorDialog(
+            rule = editing,
+            categories = categories,
+            onDismiss = { creating = false; editing = null },
+            onSave = { id, pattern, matchType, categoryId ->
+                onSave(id, pattern, matchType, categoryId)
+                creating = false
+                editing = null
+            }
+        )
+    }
+    deleting?.let { rule ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除这条规则？") },
+            text = { Text("删除后，“${rule.pattern}”将不再自动归入原分类，已有账单不会改变。") },
+            confirmButton = {
+                Button(onClick = { onDelete(rule.id); deleting = null }) { Text("删除") }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("取消") } }
+        )
+    }
+}
+
+@Composable
+private fun MerchantRuleEditorDialog(
+    rule: MerchantRuleEntity?,
+    categories: List<CategoryEntity>,
+    onDismiss: () -> Unit,
+    onSave: (String?, String, String, String) -> Unit
+) {
+    var pattern by remember(rule?.id) { mutableStateOf(rule?.pattern.orEmpty()) }
+    var matchType by remember(rule?.id) { mutableStateOf(rule?.matchType ?: "EXACT") }
+    var categoryId by remember(rule?.id, categories) { mutableStateOf(rule?.categoryId ?: categories.firstOrNull()?.id.orEmpty()) }
+    var error by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (rule == null) "新增商户规则" else "编辑商户规则") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                OutlinedTextField(
+                    value = pattern,
+                    onValueChange = { pattern = it.take(80); error = false },
+                    label = { Text("商户或关键词") },
+                    supportingText = { Text("精确匹配适合固定商户；关键词和品牌可覆盖名称变体。") },
+                    isError = error,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("EXACT" to "精确", "KEYWORD" to "关键词", "BRAND" to "品牌").forEach { (value, label) ->
+                        FilterChip(selected = matchType == value, onClick = { matchType = value }, label = { Text(label) })
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("分类", style = MaterialTheme.typography.titleSmall)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    categories.forEach { category ->
+                        FilterChip(selected = categoryId == category.id, onClick = { categoryId = category.id }, label = { Text("${category.icon} ${category.name}") })
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (pattern.isBlank() || categoryId.isBlank()) error = true
+                    else onSave(rule?.id, pattern, matchType, categoryId)
+                },
+                enabled = categories.isNotEmpty()
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+private fun ruleMatchLabel(value: String): String = when (value) {
+    "EXACT" -> "精确匹配"
+    "BRAND" -> "品牌匹配"
+    else -> "关键词匹配"
 }
 
 @Composable

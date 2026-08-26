@@ -9,9 +9,12 @@ import com.moji.app.data.BudgetEntity
 import com.moji.app.data.CategoryEntity
 import com.moji.app.data.Direction
 import com.moji.app.data.LedgerSummary
+import com.moji.app.data.MerchantRuleEntity
 import com.moji.app.data.MojiRepository
+import com.moji.app.data.Platform
 import com.moji.app.data.TransactionEntity
 import com.moji.app.data.TransactionCandidateEntity
+import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.backup.BackupManager
 import com.moji.app.settings.MojiSettings
@@ -21,9 +24,12 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import java.util.Calendar
 
 data class LedgerUiState(
@@ -35,7 +41,33 @@ data class LedgerUiState(
     val query: String = ""
 )
 
-@OptIn(ExperimentalCoroutinesApi::class)
+data class LedgerFilters(
+    val dateFrom: Long? = null,
+    val dateTo: Long? = null,
+    val platforms: Set<String> = emptySet(),
+    val sources: Set<String> = emptySet(),
+    val statuses: Set<String> = emptySet()
+) {
+    val activeCount: Int
+        get() = listOf(dateFrom != null || dateTo != null, platforms.isNotEmpty(), sources.isNotEmpty(), statuses.isNotEmpty()).count { it }
+}
+
+internal fun TransactionWithCategory.matchesLedgerFilter(search: String, filters: LedgerFilters): Boolean {
+    val transaction = transaction
+    val textMatches = search.isBlank() ||
+        transaction.merchantRaw.orEmpty().lowercase().contains(search) ||
+        transaction.note.orEmpty().lowercase().contains(search) ||
+        category?.name.orEmpty().lowercase().contains(search) ||
+        transaction.amountMinor.toString().contains(search)
+    return textMatches &&
+        (filters.dateFrom == null || transaction.occurredAt >= filters.dateFrom) &&
+        (filters.dateTo == null || transaction.occurredAt <= filters.dateTo) &&
+        (filters.platforms.isEmpty() || transaction.platform in filters.platforms) &&
+        (filters.sources.isEmpty() || transaction.source in filters.sources) &&
+        (filters.statuses.isEmpty() || transaction.status in filters.statuses)
+}
+
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class MojiViewModel(
     private val repository: MojiRepository,
     private val settingsStore: MojiSettings
@@ -43,6 +75,7 @@ class MojiViewModel(
     private val backupManager = BackupManager(repository, settingsStore)
     private val monthOffset = MutableStateFlow(0)
     private val query = MutableStateFlow("")
+    private val ledgerFilters = MutableStateFlow(LedgerFilters())
     val operationMessage = MutableStateFlow<String?>(null)
 
     val settings: StateFlow<UserSettings> = settingsStore.values.stateIn(
@@ -51,40 +84,58 @@ class MojiViewModel(
     val pendingCandidates = repository.pendingCandidates.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList()
     )
-    val allRows = repository.ledgerRows.stateIn(
+    val rules: StateFlow<List<MerchantRuleEntity>> = repository.rules.stateIn(
         viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList()
     )
+    val filters: StateFlow<LedgerFilters> = ledgerFilters
+    val searchQuery: StateFlow<String> = query
+
+    private val categories = repository.categories.stateIn(
+        viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList()
+    )
+    private val monthBounds = monthOffset.map(::boundsForMonthOffset).stateIn(
+        viewModelScope,
+        SharingStarted.WhileSubscribed(5_000),
+        boundsForMonthOffset(0)
+    )
+    private val monthTransactions = monthBounds.flatMapLatest { bounds ->
+        repository.transactionsBetween(bounds.first, bounds.second)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private val monthRows = combine(monthTransactions, categories) { transactions, categoryValues ->
+        val byId = categoryValues.associateBy { it.id }
+        transactions.map { TransactionWithCategory(it, byId[it.categoryId]) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val currentMonthRows: StateFlow<List<TransactionWithCategory>> = monthRows
+
+    val yearRows: StateFlow<List<TransactionWithCategory>> = combine(
+        repository.transactionsBetween(startOfYear(System.currentTimeMillis()), endOfYear(System.currentTimeMillis())),
+        categories
+    ) { transactions, categoryValues ->
+        val byId = categoryValues.associateBy { it.id }
+        transactions.map { TransactionWithCategory(it, byId[it.categoryId]) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private data class SearchState(val rawQuery: String, val normalizedQuery: String, val filters: LedgerFilters)
+    private val searchState = combine(query.debounce(250), ledgerFilters) { search, values ->
+        SearchState(search, search.trim().lowercase(), values)
+    }
 
     val uiState: StateFlow<LedgerUiState> = combine(
-        repository.ledgerRows,
-        repository.categories,
-        monthOffset,
-        query
-    ) { rows, categories, offset, search ->
-        val calendar = Calendar.getInstance().apply {
-            set(Calendar.DAY_OF_MONTH, 1)
-            add(Calendar.MONTH, offset)
-        }
-        val start = startOfMonth(calendar.timeInMillis)
-        val end = endOfMonth(calendar.timeInMillis)
+        monthRows,
+        categories,
+        monthBounds,
+        searchState
+    ) { rows, categoryValues, bounds, searchState ->
+        val start = bounds.first
+        val end = bounds.second
         val todayStart = startOfDay(System.currentTimeMillis())
-        val normalizedSearch = search.trim().lowercase()
-        val monthRows = rows.filter { it.transaction.occurredAt in start..end }
-        val visible = monthRows.filter { row ->
-            (
-                normalizedSearch.isBlank() ||
-                    row.transaction.merchantRaw.orEmpty().lowercase().contains(normalizedSearch) ||
-                    row.transaction.note.orEmpty().lowercase().contains(normalizedSearch) ||
-                    row.category?.name.orEmpty().contains(normalizedSearch) ||
-                    row.transaction.amountMinor.toString().contains(normalizedSearch)
-                )
-        }
-        val valid = monthRows.map { it.transaction }.filter {
+        val visible = rows.filter { it.matchesLedgerFilter(searchState.normalizedQuery, searchState.filters) }
+        val valid = rows.map { it.transaction }.filter {
             it.includeInStats && it.status != "PENDING_REVIEW" && it.deletedAt == null
         }
         LedgerUiState(
             rows = visible,
-            categories = categories,
+            categories = categoryValues,
             summary = LedgerSummary(
                 monthExpenseMinor = (valid.filter { it.direction == Direction.EXPENSE.name }.sumOf { it.amountMinor } -
                     valid.filter { it.status == "REFUND" }.sumOf { it.amountMinor }).coerceAtLeast(0),
@@ -94,7 +145,7 @@ class MojiViewModel(
             ),
             monthStart = start,
             monthEnd = end,
-            query = search
+            query = searchState.rawQuery
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LedgerUiState())
 
@@ -102,9 +153,14 @@ class MojiViewModel(
         repository.budgets(monthKey(offset))
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    fun previousMonth() { monthOffset.value -= 1 }
-    fun nextMonth() { if (monthOffset.value < 0) monthOffset.value += 1 }
+    fun previousMonth() { monthOffset.value -= 1; clearDateFilter() }
+    fun nextMonth() { if (monthOffset.value < 0) { monthOffset.value += 1; clearDateFilter() } }
     fun setQuery(value: String) { query.value = value }
+    fun setFilters(value: LedgerFilters) { ledgerFilters.value = value }
+    fun clearFilters() { ledgerFilters.value = LedgerFilters() }
+    private fun clearDateFilter() { ledgerFilters.value = ledgerFilters.value.copy(dateFrom = null, dateTo = null) }
+
+    suspend fun transactionById(id: String): TransactionEntity? = repository.transactionById(id)
 
     fun saveTransaction(
         existingId: String?, amountMinor: Long, direction: Direction, merchant: String?,
@@ -126,6 +182,10 @@ class MojiViewModel(
     fun ignoreCandidate(id: String) = viewModelScope.launch { repository.ignoreCandidate(id) }
     fun addCategory(name: String, icon: String) = runOperation("分类已添加") { repository.addCategory(name, icon) }
     fun setCategoryHidden(id: String, hidden: Boolean) = viewModelScope.launch { repository.setCategoryHidden(id, hidden) }
+    fun saveRule(id: String?, pattern: String, matchType: String, categoryId: String) =
+        runOperation("商户规则已保存") { repository.saveRule(id, pattern, matchType, categoryId) }
+    fun setRuleEnabled(id: String, enabled: Boolean) = viewModelScope.launch { repository.setRuleEnabled(id, enabled) }
+    fun deleteRule(id: String) = runOperation("商户规则已删除") { repository.deleteRule(id) }
     fun recordRefund(originalId: String, amountMinor: Long) = runOperation("退款已记录") {
         repository.recordRefund(originalId, amountMinor)
     }
@@ -167,6 +227,21 @@ private fun monthKey(offset: Int): String {
     val c = Calendar.getInstance().apply { add(Calendar.MONTH, offset) }
     return "%04d-%02d".format(c.get(Calendar.YEAR), c.get(Calendar.MONTH) + 1)
 }
+
+private fun boundsForMonthOffset(offset: Int): Pair<Long, Long> {
+    val calendar = Calendar.getInstance().apply { add(Calendar.MONTH, offset) }
+    return startOfMonth(calendar.timeInMillis) to endOfMonth(calendar.timeInMillis)
+}
+
+private fun startOfYear(value: Long): Long = Calendar.getInstance().apply {
+    timeInMillis = value
+    set(Calendar.DAY_OF_YEAR, 1); set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+}.timeInMillis
+
+private fun endOfYear(value: Long): Long = Calendar.getInstance().apply {
+    timeInMillis = startOfYear(value)
+    add(Calendar.YEAR, 1); add(Calendar.MILLISECOND, -1)
+}.timeInMillis
 
 fun startOfDay(value: Long): Long = Calendar.getInstance().apply {
     timeInMillis = value

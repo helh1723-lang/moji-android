@@ -1,20 +1,17 @@
 package com.moji.app.data
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.combine
 import java.text.Normalizer
 import java.util.UUID
 
 class MojiRepository(private val database: MojiDatabase) {
     private val dao = database.dao()
 
-    val transactions: Flow<List<TransactionEntity>> = dao.observeTransactions()
     val categories: Flow<List<CategoryEntity>> = dao.observeCategories()
     val pendingCandidates: Flow<List<TransactionCandidateEntity>> = dao.observePendingCandidates()
-    val ledgerRows: Flow<List<TransactionWithCategory>> = combine(transactions, categories) { transactions, categories ->
-        val byId = categories.associateBy { it.id }
-        transactions.map { TransactionWithCategory(it, byId[it.categoryId]) }
-    }
+    val rules: Flow<List<MerchantRuleEntity>> = dao.observeRules()
+    fun transactionsBetween(after: Long, before: Long): Flow<List<TransactionEntity>> =
+        dao.observeTransactionsBetween(after, before)
 
     suspend fun seedCategories() {
         if (dao.categoryCount() > 0) return
@@ -77,7 +74,9 @@ class MojiRepository(private val database: MojiDatabase) {
     suspend fun restore(id: String) = dao.restore(id)
     suspend fun upsertBudget(budget: BudgetEntity) = dao.upsertBudget(budget)
     fun budgets(month: String) = dao.observeBudgets(month)
-    suspend fun allForBackup() = dao.allTransactionsForBackup()
+    suspend fun transactionCountForBackup() = dao.transactionCountForBackup()
+    suspend fun transactionBatchForBackup(limit: Int, offset: Int) = dao.transactionBatchForBackup(limit, offset)
+    suspend fun transactionById(id: String) = dao.transactionById(id)
     suspend fun categoriesNow() = dao.categoriesNow()
     suspend fun budgetsNow() = dao.allBudgets()
     suspend fun rulesNow() = dao.allRules()
@@ -124,6 +123,7 @@ class MojiRepository(private val database: MojiDatabase) {
     }
     suspend fun ignoreCandidate(id: String) = dao.updateCandidateStatus(id, CandidateStatus.IGNORED.name, "USER_IGNORED")
     suspend fun pruneCaptureEvents(now: Long) = dao.pruneCaptureEvents(now)
+    suspend fun pruneTerminalCandidates(before: Long) = dao.pruneTerminalCandidates(before)
     suspend fun categoryForMerchant(merchant: String?): String? {
         val normalized = normalizeMerchant(merchant) ?: return null
         return dao.enabledRules().firstOrNull { rule ->
@@ -145,6 +145,30 @@ class MojiRepository(private val database: MojiDatabase) {
         ))
     }
     suspend fun setCategoryHidden(id: String, hidden: Boolean) = dao.setCategoryHidden(id, hidden)
+    suspend fun saveRule(id: String?, pattern: String, matchType: String, categoryId: String) {
+        val normalizedPattern = normalizeMerchant(pattern)?.take(80) ?: error("规则内容不能为空")
+        require(matchType in setOf("EXACT", "KEYWORD", "BRAND")) { "不支持的匹配方式" }
+        val existing = if (id == null) null else dao.ruleById(id)
+        val now = System.currentTimeMillis()
+        val base = existing ?: MerchantRuleEntity(
+            pattern = normalizedPattern,
+            normalizedBrand = normalizedPattern,
+            matchType = matchType,
+            categoryId = categoryId
+        )
+        dao.upsertRule(
+            base.copy(
+                pattern = normalizedPattern,
+                normalizedBrand = normalizedPattern,
+                matchType = matchType,
+                categoryId = categoryId,
+                enabled = existing?.enabled ?: true,
+                updatedAt = now
+            )
+        )
+    }
+    suspend fun setRuleEnabled(id: String, enabled: Boolean) = dao.setRuleEnabled(id, enabled)
+    suspend fun deleteRule(id: String) = dao.deleteRule(id)
     suspend fun recordRefund(originalId: String, amountMinor: Long) {
         val original = dao.transactionById(originalId) ?: error("原交易不存在")
         require(original.direction == Direction.EXPENSE.name && amountMinor > 0)

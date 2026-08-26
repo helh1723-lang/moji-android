@@ -40,6 +40,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.lang.ref.WeakReference
 
 internal fun parseQuickAmountMinor(value: String): Long? = runCatching {
     BigDecimal(value.trim())
@@ -51,7 +52,7 @@ internal fun parseQuickAmountMinor(value: String): Long? = runCatching {
 object CaptureFeedback {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var activeOverlay: ActiveOverlay? = null
+    private var activeOverlay: WeakReference<ActiveOverlay>? = null
 
     fun show(context: Context, transaction: TransactionEntity, categories: List<CategoryEntity>) {
         mainHandler.post {
@@ -59,6 +60,12 @@ object CaptureFeedback {
                 ?: MojiAccessibilityService.connectedInstance()
             val shown = overlayService != null && showAccessibilityCard(overlayService, transaction, categories)
             if (!shown) showNotification(context, transaction, categories)
+        }
+    }
+
+    fun dismissFor(service: AccessibilityService) {
+        mainHandler.post {
+            currentOverlay()?.takeIf { it.root.context === service }?.let { dismissOverlay() }
         }
     }
 
@@ -100,7 +107,7 @@ object CaptureFeedback {
         val manager = service.getSystemService(WindowManager::class.java)
         manager.addView(root, params)
         val overlay = ActiveOverlay(manager, root, params)
-        activeOverlay = overlay
+        activeOverlay = WeakReference(overlay)
         renderSummary(service, overlay, card, transaction, categories, palette)
         scheduleClose(overlay, CARD_DURATION_MS)
         true
@@ -252,7 +259,7 @@ object CaptureFeedback {
                         )
                     }
                     mainHandler.post {
-                        if (activeOverlay !== overlay) return@post
+                        if (currentOverlay() !== overlay) return@post
                         result.onSuccess {
                             hideKeyboard(service, amountInput)
                             setOverlayFocusable(service, overlay, false)
@@ -269,7 +276,7 @@ object CaptureFeedback {
         })
         amountInput.requestFocus()
         mainHandler.postDelayed({
-            if (activeOverlay === overlay) {
+            if (currentOverlay() === overlay) {
                 service.getSystemService(InputMethodManager::class.java)
                     .showSoftInput(amountInput, InputMethodManager.SHOW_IMPLICIT)
             }
@@ -385,7 +392,7 @@ object CaptureFeedback {
     private fun scheduleClose(overlay: ActiveOverlay, delayMs: Long) {
         cancelClose(overlay)
         overlay.closeRunnable = Runnable {
-            if (activeOverlay === overlay) dismissOverlay()
+            if (currentOverlay() === overlay) dismissOverlay()
         }.also { mainHandler.postDelayed(it, delayMs) }
     }
 
@@ -399,12 +406,14 @@ object CaptureFeedback {
     }
 
     private fun dismissOverlay() {
-        val overlay = activeOverlay ?: return
+        val overlay = currentOverlay() ?: return
         cancelClose(overlay)
         hideKeyboard(overlay.root.context, overlay.root)
         runCatching { overlay.manager.removeView(overlay.root) }
         activeOverlay = null
     }
+
+    private fun currentOverlay(): ActiveOverlay? = activeOverlay?.get()
 
     private fun hideKeyboard(context: Context, view: View) {
         context.getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(view.windowToken, 0)
