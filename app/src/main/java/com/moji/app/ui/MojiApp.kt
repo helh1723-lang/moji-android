@@ -75,8 +75,10 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -314,8 +316,12 @@ private fun MainShell(
                     viewModel.deleteTransaction(tx.id)
                     showEditor = false
                     scope.launch {
-                        val result = snackbar.showSnackbar("已删除 ${tx.merchantRaw ?: "一笔账单"}", actionLabel = "撤销")
-                        if (result.name == "ActionPerformed") viewModel.restoreTransaction(tx.id)
+                        val result = snackbar.showSnackbar(
+                            message = "已删除 ${tx.note?.takeIf(String::isNotBlank) ?: tx.merchantRaw ?: "一笔账单"}",
+                            actionLabel = "撤销",
+                            duration = SnackbarDuration.Short
+                        )
+                        if (result == SnackbarResult.ActionPerformed) viewModel.restoreTransaction(tx.id)
                     }
                 }
             },
@@ -643,10 +649,17 @@ private fun TransactionRow(row: TransactionWithCategory, onClick: () -> Unit) {
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    row.transaction.merchantRaw ?: if (income) "一笔收入" else "未知商户",
-                    style = MaterialTheme.typography.titleMedium
+                    row.transaction.note?.takeIf(String::isNotBlank)
+                        ?: row.category?.name
+                        ?: if (income) "一笔收入" else "一笔支出",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
                 )
-                Text(row.category?.name ?: "其他", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    row.transaction.merchantRaw?.takeIf(String::isNotBlank) ?: "未填写商户",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             Text(
                 prefix + money(row.transaction.amountMinor),
