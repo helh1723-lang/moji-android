@@ -2,6 +2,7 @@ package com.moji.app.capture
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -305,6 +306,7 @@ object CaptureFeedback {
             manager.createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "自动记账结果", NotificationManager.IMPORTANCE_HIGH).apply {
                     description = "支付完成后的自动记账结果"
+                    lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                     setSound(null, null)
                     enableVibration(false)
                 }
@@ -322,12 +324,22 @@ object CaptureFeedback {
         )
         val merchant = transaction.merchantRaw ?: "未知商户"
         val categoryName = categories.firstOrNull { it.id == transaction.categoryId }?.name ?: "其他"
+        val publicNotification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(context.getString(R.string.capture_feedback_title).trimStart('✓', ' '))
+            .setContentText(context.getString(R.string.capture_feedback_private_detail))
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSilent(true)
+            .build()
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(context.getString(R.string.capture_feedback_title).trimStart('✓', ' '))
             .setContentText(context.getString(R.string.capture_feedback_detail, merchant, transaction.amountMinor / 100.0))
             .setSubText("$categoryName · ${platformLabel(transaction.platform)}")
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification)
             .setContentIntent(editIntent)
             .addAction(0, "撤销", undoIntent)
             .addAction(0, "修改", editIntent)

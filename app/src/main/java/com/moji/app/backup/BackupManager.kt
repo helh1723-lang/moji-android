@@ -280,8 +280,6 @@ class BackupManager(private val repository: MojiRepository, private val settings
         }
         return digest.digest().toHex()
     }
-    private fun csvCell(value:String)="\"${value.replace("\"","\"\"")}\""
-
     private fun inlineCell(column:Int,row:Int,value:String) = "<c r=\"${columnName(column)}$row\" t=\"inlineStr\"><is><t xml:space=\"preserve\">${xml(value)}</t></is></c>"
     private fun numberCell(column:Int,row:Int,value:Number,style:Int) = "<c r=\"${columnName(column)}$row\" s=\"$style\"><v>$value</v></c>"
     private fun columnName(index:Int):String { var n=index+1; var result=""; while(n>0){n--;result=('A'.code+n%26).toChar()+result;n/=26};return result }
@@ -295,14 +293,19 @@ class BackupManager(private val repository: MojiRepository, private val settings
         val ALLOWED_ENTRIES = setOf(MANIFEST_ENTRY, DATA_ENTRY)
         const val MAX_ZIP_ENTRIES = 2
         const val MAX_MANIFEST_BYTES = 64L * 1024
-        const val MAX_DATA_BYTES = 64L * 1024 * 1024
-        const val MAX_TRANSACTIONS = 100_000
+        const val MAX_DATA_BYTES = 16L * 1024 * 1024
+        const val MAX_TRANSACTIONS = 25_000
         const val MAX_CATEGORIES = 1_000
         const val MAX_BUDGETS = 10_000
         const val MAX_RULES = 10_000
-        const val MAX_REFUNDS = 100_000
+        const val MAX_REFUNDS = 25_000
         const val BACKUP_BATCH_SIZE = 500
     }
+}
+
+internal fun csvCell(value: String): String {
+    val protected = if (value.firstOrNull()?.let { it in setOf('=', '+', '-', '@', '\t', '\r') } == true) "'$value" else value
+    return "\"${protected.replace("\"", "\"\"")}\""
 }
 
 private fun JSONObject.putNullable(key:String,value:Any?){put(key,value?:JSONObject.NULL)}
@@ -344,12 +347,19 @@ private fun <T> JsonReader.readObjectArray(limit: Int, parser: (JSONObject) -> T
 
 private fun JsonReader.readFlatObject(): JSONObject = JSONObject().also { value ->
     beginObject()
+    var fieldCount = 0
     while (hasNext()) {
+        require(++fieldCount <= MAX_BACKUP_FIELDS_PER_OBJECT) { "备份对象字段数量超过上限" }
         val name = nextName()
+        require(name.length <= MAX_BACKUP_FIELD_CHARS) { "备份字段名称过长" }
         when (peek()) {
             JsonToken.NULL -> { nextNull(); value.put(name, JSONObject.NULL) }
             JsonToken.BOOLEAN -> value.put(name, nextBoolean())
-            JsonToken.STRING -> value.put(name, nextString())
+            JsonToken.STRING -> {
+                val text = nextString()
+                require(text.length <= MAX_BACKUP_FIELD_CHARS) { "备份文本字段过长" }
+                value.put(name, text)
+            }
             JsonToken.NUMBER -> {
                 val number = nextString()
                 value.put(name, if (number.contains('.') || number.contains('e', true)) number.toDouble() else number.toLong())
@@ -359,6 +369,9 @@ private fun JsonReader.readFlatObject(): JSONObject = JSONObject().also { value 
     }
     endObject()
 }
+
+private const val MAX_BACKUP_FIELDS_PER_OBJECT = 32
+private const val MAX_BACKUP_FIELD_CHARS = 4_096
 
 private fun JsonWriter.writeJsonObject(objectValue: JSONObject): JsonWriter = apply {
     beginObject()

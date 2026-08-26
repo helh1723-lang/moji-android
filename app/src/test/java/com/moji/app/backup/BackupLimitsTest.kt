@@ -29,4 +29,11 @@ class BackupLimitsTest {
         assertThrows(IllegalArgumentException::class.java) { validateBackupEntry("data.json", false, seen) }
         assertThrows(IllegalArgumentException::class.java) { validateBackupEntry("manifest.json", true, mutableSetOf()) }
     }
+
+    @Test fun csvCellsNeutralizeSpreadsheetFormulas() {
+        assertEquals("\"'=SUM(A1:A2)\"", csvCell("=SUM(A1:A2)"))
+        assertEquals("\"'+cmd\"", csvCell("+cmd"))
+        assertEquals("\"ordinary merchant\"", csvCell("ordinary merchant"))
+        assertEquals("\"a\"\"b\"", csvCell("a\"b"))
+    }
 }
