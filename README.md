@@ -1,10 +1,6 @@
 # 默迹（Moji）Android
 
 <p align="center">
-  <img src="https://count.getloli.com/@helh1723-lang?name=moji-android&theme=minimal&padding=7&offset=0&align=center&scale=1&visibility=1" alt="访问量统计">
-</p>
-
-<p align="center">
   <img src="moji_app_icon.svg" width="128" alt="默迹 App 图标">
 </p>
 
@@ -110,3 +106,9 @@ cd moji-android
 ## 开源许可证
 
 本项目采用 [MIT License](LICENSE)。
+
+---
+
+<p align="center">
+  <img src="https://count.getloli.com/@helh1723-lang?name=moji-android&theme=minimal&padding=7&offset=0&align=center&scale=1&visibility=1" alt="访问量统计">
+</p>
