@@ -224,6 +224,8 @@ private fun MainShell(
     var showTextInput by rememberSaveable { mutableStateOf(false) }
     var voiceDrafts by remember { mutableStateOf<List<VoiceDraft>>(emptyList()) }
     var voiceDraftIndex by rememberSaveable { mutableIntStateOf(0) }
+    var savingVoiceDrafts by remember { mutableStateOf(false) }
+    var voiceSaveError by remember { mutableStateOf<String?>(null) }
     var aiParsingText by remember { mutableStateOf<String?>(null) }
     var aiParseError by remember { mutableStateOf<String?>(null) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
@@ -405,19 +407,27 @@ private fun MainShell(
             categories = ui.categories.filterNot { it.hidden },
             position = voiceDraftIndex + 1,
             total = voiceDrafts.size,
-            onDismiss = { voiceDrafts = emptyList(); voiceDraftIndex = 0 },
-            onRetry = { voiceDrafts = emptyList(); voiceDraftIndex = 0; showVoiceInput = true },
-            onPrevious = { if (voiceDraftIndex > 0) voiceDraftIndex -= 1 },
+            saving = savingVoiceDrafts,
+            saveError = voiceSaveError,
+            onDismiss = { if (!savingVoiceDrafts) { voiceDrafts = emptyList(); voiceDraftIndex = 0; voiceSaveError = null } },
+            onRetry = { if (!savingVoiceDrafts) { voiceDrafts = emptyList(); voiceDraftIndex = 0; voiceSaveError = null; showVoiceInput = true } },
+            onPrevious = { if (!savingVoiceDrafts && voiceDraftIndex > 0) voiceDraftIndex -= 1 },
             onUpdate = { updated ->
                 voiceDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
             },
-            onNext = { if (voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1 },
+            onNext = { if (!savingVoiceDrafts && voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1 },
             onSaveAll = { updated ->
-                val finalDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
-                voiceDrafts = finalDrafts
-                viewModel.saveVoiceTransactions(finalDrafts) { result ->
-                    result.onSuccess { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
-                        .onFailure { aiParseError = "保存失败，草稿仍保留：${it.message ?: "请重试"}" }
+                if (!savingVoiceDrafts) {
+                    val finalDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
+                    voiceDrafts = finalDrafts
+                    voiceSaveError = null
+                    savingVoiceDrafts = true
+                    scope.launch {
+                        runCatching { viewModel.saveVoiceTransactions(finalDrafts) }
+                            .onSuccess { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
+                            .onFailure { voiceSaveError = "保存失败，草稿仍保留：${it.message ?: "请重试"}" }
+                        savingVoiceDrafts = false
+                    }
                 }
             }
         )
@@ -902,6 +912,8 @@ private fun VoiceConfirmationSheet(
     categories: List<CategoryEntity>,
     position: Int,
     total: Int,
+    saving: Boolean,
+    saveError: String?,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
     onPrevious: () -> Unit,
@@ -937,8 +949,13 @@ private fun VoiceConfirmationSheet(
             note = note.trim().ifBlank { null }
         ) else null
     }
-    fun goNext() { revisedDraft()?.let { updated -> onUpdate(updated); if (position < total) onNext() else onSaveAll(updated) } }
-    fun goPrevious() { revisedDraft()?.let { updated -> onUpdate(updated); onPrevious() } }
+    fun goNext() {
+        if (!saving) revisedDraft()?.let { updated ->
+            onUpdate(updated)
+            if (position < total) onNext() else onSaveAll(updated)
+        }
+    }
+    fun goPrevious() { if (!saving) revisedDraft()?.let { updated -> onUpdate(updated); onPrevious() } }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -975,10 +992,11 @@ private fun VoiceConfirmationSheet(
             OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("日期：$dateText") }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
-            Button(onClick = ::goNext, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(if (position == total) "保存全部 $total 笔账单" else "确认并查看下一笔") }
-            if (position > 1) OutlinedButton(onClick = ::goPrevious, modifier = Modifier.fillMaxWidth()) { Text("返回上一笔") }
-            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
-            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+            saveError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            Button(onClick = { goNext() }, enabled = !saving, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(if (saving) "正在保存…" else if (position == total) "保存全部 $total 笔账单" else "确认并查看下一笔") }
+            if (position > 1) OutlinedButton(onClick = { goPrevious() }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("返回上一笔") }
+            OutlinedButton(onClick = onRetry, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
+            TextButton(onClick = onDismiss, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("取消") }
         }
     }
     if (showDatePicker) {

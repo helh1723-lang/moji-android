@@ -189,8 +189,8 @@ class MojiViewModel(
             )
         })
     }
-    fun saveVoiceTransactions(drafts: List<com.moji.app.voice.VoiceDraft>, onComplete: (Result<Unit>) -> Unit) = viewModelScope.launch {
-        onComplete(runCatching { repository.saveVoiceTransactions(drafts) })
+    suspend fun saveVoiceTransactions(drafts: List<com.moji.app.voice.VoiceDraft>) {
+        repository.saveVoiceTransactions(drafts)
     }
 
     fun deleteTransaction(id: String) = viewModelScope.launch { repository.softDelete(id) }
