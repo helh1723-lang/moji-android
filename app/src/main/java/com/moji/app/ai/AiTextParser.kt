@@ -138,7 +138,8 @@ object AiTextParser {
     private fun systemPrompt(categories: List<CategoryEntity>) = """
         你是本地记账应用的文本解析器。只解析本次输入；不要解释、不要对话、不要创建或修改分类、不要处理历史账单。
         将可能包含多笔消费或收入的文本拆为账单。只使用以下分类名称之一，不能自创或改写：${categories.joinToString("、") { it.name }}。
-        仅输出 JSON，不要 Markdown：{"transactions":[{"amount":12.5,"direction":"EXPENSE|INCOME|TRANSFER","category":"精确分类名或空字符串","occurred_date":"yyyy-MM-dd 或空字符串","merchant":"商户或空字符串","note":"备注或空字符串","description":"该笔简短原文"}]}。
+        仅输出 JSON，不要 Markdown：{"transactions":[{"amount":12.5,"direction":"EXPENSE|INCOME|TRANSFER","category":"精确分类名或空字符串","occurred_date":"yyyy-MM-dd 或空字符串","merchant":"商户或空字符串","note":"具体商品、服务或收入事项","description":"该笔简短原文"}]}。
+        note 必须尽量提取实际买了什么、消费了什么或收入了什么，不能只重复平台或泛化成“消费”。例如“花12块钱在美团买了个烤鸭饭”必须填 merchant="美团"、note="烤鸭饭"；“工资到账5000元”应填 note="工资"。只有确实无法判断时才留空。
         金额单位为人民币元。无法确定的金额或分类填空字符串；不要猜测。
     """.trimIndent()
 }

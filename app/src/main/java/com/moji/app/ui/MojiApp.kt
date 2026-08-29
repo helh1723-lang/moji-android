@@ -407,12 +407,18 @@ private fun MainShell(
             total = voiceDrafts.size,
             onDismiss = { voiceDrafts = emptyList(); voiceDraftIndex = 0 },
             onRetry = { voiceDrafts = emptyList(); voiceDraftIndex = 0; showVoiceInput = true },
-            onSaved = {
-                if (voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1
-                else { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
+            onPrevious = { if (voiceDraftIndex > 0) voiceDraftIndex -= 1 },
+            onUpdate = { updated ->
+                voiceDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
             },
-            onSave = { amount, direction, merchant, categoryId, occurredAt, note, complete ->
-                viewModel.saveVoiceTransaction(amount, direction, merchant, categoryId, occurredAt, note, complete)
+            onNext = { if (voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1 },
+            onSaveAll = { updated ->
+                val finalDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
+                voiceDrafts = finalDrafts
+                viewModel.saveVoiceTransactions(finalDrafts) { result ->
+                    result.onSuccess { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
+                        .onFailure { aiParseError = "保存失败，草稿仍保留：${it.message ?: "请重试"}" }
+                }
             }
         )
     }
@@ -898,8 +904,10 @@ private fun VoiceConfirmationSheet(
     total: Int,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
-    onSaved: () -> Unit,
-    onSave: (Long, Direction, String?, String, Long, String?, (Result<Unit>) -> Unit) -> Unit
+    onPrevious: () -> Unit,
+    onUpdate: (VoiceDraft) -> Unit,
+    onNext: () -> Unit,
+    onSaveAll: (VoiceDraft) -> Unit
 ) {
     var amount by remember(draft) { mutableStateOf(draft.amountMinor?.let { "%.2f".format(Locale.ROOT, it / 100.0) }.orEmpty()) }
     var merchant by remember(draft) { mutableStateOf(draft.merchant.orEmpty()) }
@@ -910,11 +918,46 @@ private fun VoiceConfirmationSheet(
     var occurredAt by remember(draft) { mutableStateOf(draft.occurredAt) }
     var showDatePicker by remember { mutableStateOf(false) }
     var error by remember(draft) { mutableStateOf(if (draft.amountMinor == null) "没有识别到金额，请手动补充。" else if (draft.categoryIds.isEmpty()) "没有识别到分类，请手动选择。" else if (draft.categoryIds.size > 1) "识别到多个可能分类，请选择。" else null) }
+    var horizontalDrag by remember(draft) { mutableFloatStateOf(0f) }
     val dateText = remember(occurredAt) { SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(Date(occurredAt)) }
+
+    fun revisedDraft(): VoiceDraft? {
+        val minor = parseAmountMinor(amount)
+        error = when {
+            minor == null || minor <= 0 -> "请输入大于 0、最多两位小数的金额"
+            categoryId.isBlank() || needsCategoryChoice -> "请选择分类"
+            else -> null
+        }
+        return if (error == null) draft.copy(
+            amountMinor = minor,
+            direction = direction,
+            merchant = merchant.trim().ifBlank { null },
+            categoryIds = listOf(categoryId),
+            occurredAt = occurredAt,
+            note = note.trim().ifBlank { null }
+        ) else null
+    }
+    fun goNext() { revisedDraft()?.let { updated -> onUpdate(updated); if (position < total) onNext() else onSaveAll(updated) } }
+    fun goPrevious() { revisedDraft()?.let { updated -> onUpdate(updated); onPrevious() } }
+
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)
+                .pointerInput(draft, position, total) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { horizontalDrag = 0f },
+                        onHorizontalDrag = { _, delta -> horizontalDrag += delta },
+                        onDragEnd = {
+                            when {
+                                horizontalDrag <= -72f && position < total -> goNext()
+                                horizontalDrag >= 72f && position > 1 -> goPrevious()
+                            }
+                        }
+                    )
+                }
+        ) {
             Text("请确认这笔账单", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            if (total > 1) Text("第 $position / $total 笔", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (total > 1) Text("第 $position / $total 笔 · 左右滑动可切换，编辑内容会保留", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("刚才识别为：“${draft.rawText}”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
             Spacer(Modifier.height(12.dp))
             Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -932,17 +975,8 @@ private fun VoiceConfirmationSheet(
             OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("日期：$dateText") }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
-            Button(onClick = {
-                val minor = parseAmountMinor(amount)
-                error = when {
-                    minor == null || minor <= 0 -> "请输入大于 0、最多两位小数的金额"
-                    categoryId.isBlank() || needsCategoryChoice -> "请选择分类"
-                    else -> null
-                }
-                if (error == null) onSave(minor!!, direction, merchant.trim().ifBlank { null }, categoryId, occurredAt, note.trim().ifBlank { null }) { result ->
-                    result.onSuccess { onSaved() }.onFailure { error = "保存失败，请稍后重试。" }
-                }
-            }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("保存账单") }
+            Button(onClick = ::goNext, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(if (position == total) "保存全部 $total 笔账单" else "确认并查看下一笔") }
+            if (position > 1) OutlinedButton(onClick = ::goPrevious, modifier = Modifier.fillMaxWidth()) { Text("返回上一笔") }
             OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
             TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
         }

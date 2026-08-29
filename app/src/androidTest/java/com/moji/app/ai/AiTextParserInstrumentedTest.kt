@@ -21,14 +21,15 @@ class AiTextParserInstrumentedTest {
 
     @Test fun acceptsMultipleValidatedDraftsAndCustomCategories() {
         val response = """{"transactions":[
-          {"amount":35,"direction":"EXPENSE","category":"正餐","occurred_date":"2026-08-29","merchant":"食堂","note":"午饭","description":"吃饭花了35元"},
+          {"amount":12,"direction":"EXPENSE","category":"正餐","occurred_date":"2026-08-29","merchant":"美团","note":"烤鸭饭","description":"在美团买烤鸭饭花了12元"},
           {"amount":88.5,"direction":"EXPENSE","category":"猫咪用品","occurred_date":"","merchant":"","note":"猫砂","description":"买猫砂"}
         ]}"""
         val drafts = AiTextParser.parseResponse(response, categories, now)
         assertEquals(2, drafts.size)
-        assertEquals(3500L, drafts[0].amountMinor)
+        assertEquals(1200L, drafts[0].amountMinor)
         assertEquals(listOf("meal"), drafts[0].categoryIds)
-        assertEquals("食堂", drafts[0].merchant)
+        assertEquals("美团", drafts[0].merchant)
+        assertEquals("烤鸭饭", drafts[0].note)
         assertEquals(8850L, drafts[1].amountMinor)
         assertEquals(listOf("custom"), drafts[1].categoryIds)
     }
