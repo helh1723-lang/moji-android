@@ -1357,9 +1357,11 @@ private fun AiTextParserSettingsSheet(
             OutlinedTextField(
                 apiKey,
                 { apiKey = it.take(500); clearKey = false },
-                label = { Text(if (settings.aiKeyConfigured && !clearKey) "API Key（已保存；留空则不修改）" else "API Key") },
+                label = { Text(if (settings.aiKeyConfigured && !clearKey) "API Key（已保存；留空则不修改）" else "API Key（支持长按粘贴）") },
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                // Password inputType makes some OEM keyboards enter a secure mode that blocks clipboard paste.
+                // Keep the visual mask, but request a normal text editor so a long API Key can be pasted.
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
