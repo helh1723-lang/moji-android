@@ -7,7 +7,15 @@ import java.math.RoundingMode
 import java.util.Calendar
 
 /** Local, deterministic parsing only. The transcript is intentionally not persisted. */
-data class VoiceDraft(val rawText: String, val amountMinor: Long?, val categoryIds: List<String>, val occurredAt: Long, val note: String?, val direction: Direction)
+data class VoiceDraft(
+    val rawText: String,
+    val amountMinor: Long?,
+    val categoryIds: List<String>,
+    val occurredAt: Long,
+    val note: String?,
+    val direction: Direction,
+    val merchant: String? = null
+)
 
 object VoiceEntryParser {
     private data class Keyword(val categoryName: String, val terms: List<String>)

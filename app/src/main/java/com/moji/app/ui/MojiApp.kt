@@ -115,6 +115,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -131,6 +132,7 @@ import com.moji.app.data.TransactionCandidateEntity
 import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.data.TransactionStatus
+import com.moji.app.ai.AiProvider
 import com.moji.app.voice.VoiceDraft
 import com.moji.app.voice.VoiceEntryParser
 import kotlinx.coroutines.launch
@@ -207,6 +209,7 @@ private fun MainShell(
     onEditConsumed: () -> Unit
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val budgets by viewModel.budgets.collectAsStateWithLifecycle()
     val yearRows by viewModel.yearRows.collectAsStateWithLifecycle()
     val currentMonthRows by viewModel.currentMonthRows.collectAsStateWithLifecycle()
@@ -218,8 +221,11 @@ private fun MainShell(
     var showEditor by rememberSaveable { mutableStateOf(false) }
     var showAddOptions by rememberSaveable { mutableStateOf(false) }
     var showVoiceInput by rememberSaveable { mutableStateOf(false) }
+    var showTextInput by rememberSaveable { mutableStateOf(false) }
     var voiceDrafts by remember { mutableStateOf<List<VoiceDraft>>(emptyList()) }
     var voiceDraftIndex by rememberSaveable { mutableIntStateOf(0) }
+    var aiParsingText by remember { mutableStateOf<String?>(null) }
+    var aiParseError by remember { mutableStateOf<String?>(null) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var refunding by remember { mutableStateOf<TransactionEntity?>(null) }
@@ -237,6 +243,23 @@ private fun MainShell(
         editing = transaction
         showEditor = true
         onEditConsumed()
+    }
+
+    val parseInput: (String) -> Unit = { transcript ->
+        if (settings.aiEnabled && settings.aiKeyConfigured) {
+            aiParsingText = transcript
+            viewModel.parseTextWithAi(transcript, ui.categories) { result ->
+                aiParsingText = null
+                voiceDrafts = result.getOrElse {
+                    aiParseError = "AI 解析失败，已改用本地规则：${it.message ?: "请检查网络、模型和 Key"}"
+                    VoiceEntryParser.parseAll(transcript, ui.categories)
+                }
+                voiceDraftIndex = 0
+            }
+        } else {
+            voiceDrafts = VoiceEntryParser.parseAll(transcript, ui.categories)
+            voiceDraftIndex = 0
+        }
     }
 
     Scaffold(
@@ -348,7 +371,8 @@ private fun MainShell(
         AddTransactionChoiceDialog(
             onDismiss = { showAddOptions = false },
             onManual = { showAddOptions = false; editing = null; showEditor = true },
-            onVoice = { showAddOptions = false; showVoiceInput = true }
+            onVoice = { showAddOptions = false; showVoiceInput = true },
+            onText = { showAddOptions = false; showTextInput = true }
         )
     }
     if (showVoiceInput) {
@@ -357,10 +381,23 @@ private fun MainShell(
             onManual = { showVoiceInput = false; editing = null; showEditor = true },
             onTranscript = { transcript ->
                 showVoiceInput = false
-                voiceDrafts = VoiceEntryParser.parseAll(transcript, ui.categories)
-                voiceDraftIndex = 0
+                parseInput(transcript)
             }
         )
+    }
+    if (showTextInput) {
+        TextInputSheet(onDismiss = { showTextInput = false }, onSubmit = { text -> showTextInput = false; parseInput(text) })
+    }
+    aiParsingText?.let {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在解析账单") },
+            text = { Text("仅发送本次输入文本和当前分类给你已选择的 AI 服务，不会读取或发送历史账单。") },
+            confirmButton = {}
+        )
+    }
+    aiParseError?.let { message ->
+        AlertDialog(onDismissRequest = { aiParseError = null }, title = { Text("AI 文本解析未完成") }, text = { Text(message) }, confirmButton = { Button(onClick = { aiParseError = null }) { Text("知道了") } })
     }
     voiceDrafts.getOrNull(voiceDraftIndex)?.let { draft ->
         VoiceConfirmationSheet(
@@ -723,14 +760,36 @@ private fun TransactionRow(row: TransactionWithCategory, onClick: () -> Unit) {
 }
 
 @Composable
-private fun AddTransactionChoiceDialog(onDismiss: () -> Unit, onManual: () -> Unit, onVoice: () -> Unit) {
+private fun AddTransactionChoiceDialog(onDismiss: () -> Unit, onManual: () -> Unit, onVoice: () -> Unit, onText: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("新增账单") },
-        text = { Text("选择录入方式。语音输入仅使用设备本地普通话识别，不会上传录音或文字。") },
-        confirmButton = { Button(onClick = onVoice) { Text("语音输入") } },
-        dismissButton = { TextButton(onClick = onManual) { Text("手动输入") } }
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("语音输入仅使用设备本地普通话识别。文本输入可按设置使用 AI 或纯本地规则解析，均需逐笔确认后才会入账。")
+                Button(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("手动输入") }
+                OutlinedButton(onClick = onVoice, modifier = Modifier.fillMaxWidth()) { Text("语音输入") }
+                OutlinedButton(onClick = onText, modifier = Modifier.fillMaxWidth()) { Text("文本输入") }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TextInputSheet(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text("文本记账", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("可一次输入多笔，例如“吃饭 35 元，买日用品 20 元，网购 88 元”。AI 开启时仅发送本次文本和当前分类；关闭时只用本地规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+            OutlinedTextField(text, { text = it.take(1_000) }, label = { Text("输入消费或收入描述") }, minLines = 4, modifier = Modifier.fillMaxWidth().padding(top = 16.dp))
+            Button(onClick = { if (text.isNotBlank()) onSubmit(text.trim()) }, enabled = text.isNotBlank(), modifier = Modifier.fillMaxWidth().padding(top = 12.dp).height(52.dp)) { Text("解析并确认") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -843,7 +902,7 @@ private fun VoiceConfirmationSheet(
     onSave: (Long, Direction, String?, String, Long, String?, (Result<Unit>) -> Unit) -> Unit
 ) {
     var amount by remember(draft) { mutableStateOf(draft.amountMinor?.let { "%.2f".format(Locale.ROOT, it / 100.0) }.orEmpty()) }
-    var merchant by remember(draft) { mutableStateOf("") }
+    var merchant by remember(draft) { mutableStateOf(draft.merchant.orEmpty()) }
     var note by remember(draft) { mutableStateOf(draft.note.orEmpty()) }
     var direction by remember(draft) { mutableStateOf(draft.direction) }
     var categoryId by remember(draft, categories) { mutableStateOf(draft.categoryIds.singleOrNull().orEmpty()) }
@@ -1115,6 +1174,7 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
     var showBackupWarning by remember { mutableStateOf(false) }
     var showCategories by remember { mutableStateOf(false) }
     var showRules by remember { mutableStateOf(false) }
+    var showAiSettings by remember { mutableStateOf(false) }
     var accessibilityEnabled by remember { mutableStateOf(false) }
     var notificationEnabled by remember { mutableStateOf(false) }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let { viewModel.writeBackup(context.contentResolver, it) } }
@@ -1160,6 +1220,18 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
         item { SectionTitle("账本") }
         item { SettingRow(Icons.Outlined.Category, "分类管理", "新增分类或隐藏不常用分类") { showCategories = true } }
         item { SettingRow(Icons.AutoMirrored.Outlined.Rule, "商户分类规则", if (rules.isEmpty()) "未设置规则" else "${rules.count { it.enabled }} 条启用 · 共 ${rules.size} 条") { showRules = true } }
+        item { SectionTitle("AI 文本解析") }
+        item {
+            SettingRow(
+                Icons.Outlined.AutoGraph,
+                "AI 文本解析",
+                when {
+                    settings.aiEnabled && settings.aiKeyConfigured -> "已启用 · ${settings.aiProvider}"
+                    settings.aiKeyConfigured -> "已配置，当前关闭"
+                    else -> "默认关闭 · 可接入自己的 API Key"
+                }
+            ) { showAiSettings = true }
+        }
         item { SettingRow(Icons.Outlined.AccountBalanceWallet, "预算", budgets.firstOrNull { it.categoryId == null }?.let { "总预算 ${money(it.limitMinor)} · ${budgets.size - 1} 个分类预算" } ?: "未设置") { showBudget = true } }
         item { SectionTitle("数据") }
         item { SettingRow(Icons.Outlined.Backup, "创建完整备份", "未加密，请妥善保管") { showBackupWarning = true } }
@@ -1234,6 +1306,77 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
             onEnabled = viewModel::setRuleEnabled,
             onDelete = viewModel::deleteRule
         )
+    }
+    if (showAiSettings) {
+        AiTextParserSettingsSheet(
+            settings = settings,
+            onDismiss = { showAiSettings = false },
+            onSave = viewModel::saveAiSettings
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AiTextParserSettingsSheet(
+    settings: com.moji.app.settings.UserSettings,
+    onDismiss: () -> Unit,
+    onSave: (Boolean, AiProvider, String, String, String, Boolean, (Result<Unit>) -> Unit) -> Unit
+) {
+    var enabled by remember(settings) { mutableStateOf(settings.aiEnabled) }
+    var provider by remember(settings) { mutableStateOf(runCatching { AiProvider.valueOf(settings.aiProvider) }.getOrDefault(AiProvider.DEEPSEEK)) }
+    var baseUrl by remember(settings) { mutableStateOf(settings.aiBaseUrl) }
+    var model by remember(settings) { mutableStateOf(settings.aiModel) }
+    var apiKey by remember { mutableStateOf("") }
+    var clearKey by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text("AI 文本解析", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("默认关闭。开启后，仅将本次语音转写文本和当前可用分类发送给你选择的服务商；不会发送历史账单、备份或已有分类规则。AI 只能生成待确认草稿，不能修改已保存账单或分类。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+            SwitchSettingRow(
+                icon = Icons.Outlined.AutoGraph,
+                title = "启用 AI 文本解析",
+                subtitle = if (settings.aiKeyConfigured && !clearKey) "仅在语音转写完成后调用" else "请先填写并保存 API Key",
+                checked = enabled,
+                onCheckedChange = { enabled = it }
+            )
+            Text("服务商", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AiProvider.entries.forEach { option ->
+                    FilterChip(selected = provider == option, onClick = {
+                        provider = option
+                        if (option != AiProvider.CUSTOM) { baseUrl = option.baseUrl; model = option.defaultModel }
+                    }, label = { Text(option.label) })
+                }
+            }
+            OutlinedTextField(baseUrl, { baseUrl = it.take(200) }, label = { Text("OpenAI 兼容接口地址") }, supportingText = { Text("仅允许 HTTPS；会自动追加 /chat/completions") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(model, { model = it.take(100) }, label = { Text("模型名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                apiKey,
+                { apiKey = it.take(500); clearKey = false },
+                label = { Text(if (settings.aiKeyConfigured && !clearKey) "API Key（已保存；留空则不修改）" else "API Key") },
+                visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (settings.aiKeyConfigured) {
+                Row(Modifier.fillMaxWidth().clickable { clearKey = !clearKey }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = clearKey, onCheckedChange = { clearKey = it })
+                    Text("删除本机已保存的 API Key", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp)) }
+            Button(onClick = {
+                onSave(enabled, provider, baseUrl, model, apiKey, clearKey) { result ->
+                    result.onSuccess { onDismiss() }.onFailure { error = it.message ?: "保存失败" }
+                }
+            }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("保存设置") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
     }
 }
 

@@ -54,7 +54,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         setContent {
-            val viewModel: MojiViewModel = viewModel(factory = MojiViewModel.Factory(app.repository, app.settings))
+            val viewModel: MojiViewModel = viewModel(factory = MojiViewModel.Factory(app.repository, app.settings, app.aiCredentials))
             MojiApp(
                 viewModel = viewModel,
                 editTransactionId = editTransactionId,
