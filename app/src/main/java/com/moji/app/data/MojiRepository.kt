@@ -1,6 +1,7 @@
 package com.moji.app.data
 
 import kotlinx.coroutines.flow.Flow
+import com.moji.app.voice.VoiceDraft
 import java.text.Normalizer
 import java.util.UUID
 
@@ -39,7 +40,8 @@ class MojiRepository(private val database: MojiDatabase) {
         occurredAt: Long,
         note: String?,
         includeInStats: Boolean = true,
-        createMerchantRule: Boolean = false
+        createMerchantRule: Boolean = false,
+        source: TransactionSource = TransactionSource.MANUAL
     ) {
         require(amountMinor > 0)
         val existing = existingId?.let { dao.transactionById(it) }
@@ -57,6 +59,7 @@ class MojiRepository(private val database: MojiDatabase) {
             occurredAt = occurredAt,
             note = note?.trim()?.takeIf { it.isNotEmpty() },
             includeInStats = includeInStats,
+            source = if (existing == null) source.name else existing.source,
             updatedAt = now
         )
         if (existing == null) dao.insertTransaction(transaction) else dao.updateTransaction(transaction)
@@ -68,6 +71,29 @@ class MojiRepository(private val database: MojiDatabase) {
                 categoryId = categoryId
             ))
         }
+    }
+
+    /** Multi-bill confirmation stays in memory until the final save, then commits as one Room transaction. */
+    suspend fun saveVoiceTransactions(drafts: List<VoiceDraft>) {
+        require(drafts.isNotEmpty()) { "没有待保存账单" }
+        val now = System.currentTimeMillis()
+        val transactions = drafts.map { draft ->
+            val categoryId = draft.categoryIds.singleOrNull() ?: error("请先为每笔账单选择一个分类")
+            val amount = draft.amountMinor ?: error("请先补充每笔账单金额")
+            TransactionEntity(
+                amountMinor = amount,
+                direction = draft.direction.name,
+                merchantRaw = draft.merchant?.trim()?.takeIf { it.isNotEmpty() },
+                merchantNormalized = normalizeMerchant(draft.merchant),
+                categoryId = categoryId,
+                occurredAt = draft.occurredAt,
+                note = draft.note,
+                source = TransactionSource.VOICE.name,
+                createdAt = now,
+                updatedAt = now
+            )
+        }
+        dao.insertTransactionsAtomically(transactions)
     }
 
     suspend fun softDelete(id: String) = dao.softDelete(id, System.currentTimeMillis())

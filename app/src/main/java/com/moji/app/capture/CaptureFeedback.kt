@@ -187,9 +187,15 @@ object CaptureFeedback {
         val merchantInput = editField(service, "商户（可留空）", transaction.merchantRaw.orEmpty(), palette).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         }
+        val noteInput = editField(service, "备注（可留空）", transaction.note.orEmpty(), palette).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            filters = arrayOf(android.text.InputFilter.LengthFilter(100))
+        }
         card.addView(amountInput)
         card.addView(space(service, 8))
         card.addView(merchantInput)
+        card.addView(space(service, 8))
+        card.addView(noteInput)
         card.addView(space(service, 8))
 
         val categoryText = TextView(service).apply {
@@ -254,7 +260,7 @@ object CaptureFeedback {
                             merchant = merchantInput.text.toString(),
                             categoryId = selectedCategory.id,
                             occurredAt = transaction.occurredAt,
-                            note = transaction.note,
+                            note = noteInput.text.toString().trim().take(100).ifBlank { null },
                             includeInStats = transaction.includeInStats,
                             createMerchantRule = false
                         )

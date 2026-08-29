@@ -36,6 +36,11 @@ interface MojiDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertTransaction(transaction: TransactionEntity)
 
+    @Transaction
+    suspend fun insertTransactionsAtomically(transactions: List<TransactionEntity>) {
+        for (transaction in transactions) insertTransaction(transaction)
+    }
+
     @Update
     suspend fun updateTransaction(transaction: TransactionEntity)
 

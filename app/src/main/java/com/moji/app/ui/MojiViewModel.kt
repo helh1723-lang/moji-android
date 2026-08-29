@@ -17,6 +17,10 @@ import com.moji.app.data.TransactionCandidateEntity
 import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.backup.BackupManager
+import com.moji.app.ai.AiConfig
+import com.moji.app.ai.AiCredentialStore
+import com.moji.app.ai.AiProvider
+import com.moji.app.ai.AiTextParser
 import com.moji.app.settings.MojiSettings
 import com.moji.app.settings.UserSettings
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +32,8 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
 import java.util.Calendar
@@ -70,7 +76,8 @@ internal fun TransactionWithCategory.matchesLedgerFilter(search: String, filters
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class MojiViewModel(
     private val repository: MojiRepository,
-    private val settingsStore: MojiSettings
+    private val settingsStore: MojiSettings,
+    private val aiCredentials: AiCredentialStore
 ) : ViewModel() {
     private val backupManager = BackupManager(repository, settingsStore)
     private val monthOffset = MutableStateFlow(0)
@@ -164,9 +171,26 @@ class MojiViewModel(
 
     fun saveTransaction(
         existingId: String?, amountMinor: Long, direction: Direction, merchant: String?,
-        categoryId: String, occurredAt: Long, note: String?, includeInStats: Boolean, createMerchantRule: Boolean
+        categoryId: String, occurredAt: Long, note: String?, includeInStats: Boolean, createMerchantRule: Boolean,
+        source: TransactionSource = TransactionSource.MANUAL
     ) = viewModelScope.launch {
-        repository.saveTransaction(existingId, amountMinor, direction, merchant, categoryId, occurredAt, note, includeInStats, createMerchantRule)
+        repository.saveTransaction(existingId, amountMinor, direction, merchant, categoryId, occurredAt, note, includeInStats, createMerchantRule, source)
+    }
+
+    fun saveVoiceTransaction(
+        amountMinor: Long, direction: Direction, merchant: String?, categoryId: String,
+        occurredAt: Long, note: String?, onComplete: (Result<Unit>) -> Unit
+    ) = viewModelScope.launch {
+        onComplete(runCatching {
+            repository.saveTransaction(
+                amountMinor = amountMinor, direction = direction, merchant = merchant,
+                categoryId = categoryId, occurredAt = occurredAt, note = note,
+                createMerchantRule = false, source = TransactionSource.VOICE
+            )
+        })
+    }
+    suspend fun saveVoiceTransactions(drafts: List<com.moji.app.voice.VoiceDraft>) {
+        repository.saveVoiceTransactions(drafts)
     }
 
     fun deleteTransaction(id: String) = viewModelScope.launch { repository.softDelete(id) }
@@ -174,6 +198,34 @@ class MojiViewModel(
     fun completeOnboarding() = viewModelScope.launch { settingsStore.completeOnboarding() }
     fun setDarkTheme(value: Boolean) = viewModelScope.launch { settingsStore.setDarkTheme(value) }
     fun setHideRecents(value: Boolean) = viewModelScope.launch { settingsStore.setHideRecents(value) }
+    fun saveAiSettings(
+        enabled: Boolean, provider: AiProvider, baseUrl: String, model: String, apiKey: String,
+        clearKey: Boolean, onComplete: (Result<Unit>) -> Unit
+    ) = viewModelScope.launch {
+        val result = runCatching {
+            val effectiveBaseUrl = baseUrl.trim()
+            val effectiveModel = model.trim()
+            require(effectiveBaseUrl.startsWith("https://")) { "接口地址必须使用 HTTPS" }
+            require(effectiveModel.isNotBlank()) { "请填写模型名称" }
+            if (clearKey) aiCredentials.clear()
+            if (apiKey.isNotBlank()) aiCredentials.save(apiKey)
+            val hasKey = aiCredentials.read() != null
+            require(!enabled || hasKey) { "开启 AI 前请填写 API Key" }
+            settingsStore.saveAiSettings(enabled, provider, effectiveBaseUrl, effectiveModel, hasKey)
+        }
+        onComplete(result)
+    }
+    fun parseTextWithAi(text: String, categories: List<CategoryEntity>, onComplete: (Result<List<com.moji.app.voice.VoiceDraft>>) -> Unit) = viewModelScope.launch {
+        val result = runCatching {
+            val values = settingsStore.backupValues()
+            val provider = runCatching { AiProvider.valueOf(values.aiProvider) }.getOrDefault(AiProvider.CUSTOM)
+            val key = aiCredentials.read() ?: error("请先在设置中填写 API Key")
+            withContext(Dispatchers.IO) {
+                AiTextParser.parse(AiConfig(values.aiEnabled, provider, values.aiBaseUrl, values.aiModel), key, text, categories)
+            }
+        }
+        onComplete(result)
+    }
     fun setCaptureConsent(value: Boolean) = viewModelScope.launch { settingsStore.setCaptureConsent(value) }
     fun enableDebugCapture() = viewModelScope.launch { settingsStore.enableDebugCapture() }
     fun confirmCandidate(candidate: TransactionCandidateEntity, direction: Direction) = viewModelScope.launch {
@@ -216,10 +268,11 @@ class MojiViewModel(
 
     class Factory(
         private val repository: MojiRepository,
-        private val settings: MojiSettings
+        private val settings: MojiSettings,
+        private val aiCredentials: AiCredentialStore
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = MojiViewModel(repository, settings) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = MojiViewModel(repository, settings, aiCredentials) as T
     }
 }
 

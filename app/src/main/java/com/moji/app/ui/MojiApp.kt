@@ -1,7 +1,13 @@
 package com.moji.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -85,6 +91,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -108,12 +115,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.moji.app.data.CategoryEntity
 import com.moji.app.data.Direction
 import com.moji.app.data.MerchantRuleEntity
@@ -123,6 +132,9 @@ import com.moji.app.data.TransactionCandidateEntity
 import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.data.TransactionStatus
+import com.moji.app.ai.AiProvider
+import com.moji.app.voice.VoiceDraft
+import com.moji.app.voice.VoiceEntryParser
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -197,6 +209,7 @@ private fun MainShell(
     onEditConsumed: () -> Unit
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
+    val settings by viewModel.settings.collectAsStateWithLifecycle()
     val budgets by viewModel.budgets.collectAsStateWithLifecycle()
     val yearRows by viewModel.yearRows.collectAsStateWithLifecycle()
     val currentMonthRows by viewModel.currentMonthRows.collectAsStateWithLifecycle()
@@ -206,6 +219,15 @@ private fun MainShell(
     var tab by rememberSaveable { mutableStateOf(MainTab.LEDGER) }
     var editing by remember { mutableStateOf<TransactionEntity?>(null) }
     var showEditor by rememberSaveable { mutableStateOf(false) }
+    var showAddOptions by rememberSaveable { mutableStateOf(false) }
+    var showVoiceInput by rememberSaveable { mutableStateOf(false) }
+    var showTextInput by rememberSaveable { mutableStateOf(false) }
+    var voiceDrafts by remember { mutableStateOf<List<VoiceDraft>>(emptyList()) }
+    var voiceDraftIndex by rememberSaveable { mutableIntStateOf(0) }
+    var savingVoiceDrafts by remember { mutableStateOf(false) }
+    var voiceSaveError by remember { mutableStateOf<String?>(null) }
+    var aiParsingText by remember { mutableStateOf<String?>(null) }
+    var aiParseError by remember { mutableStateOf<String?>(null) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var refunding by remember { mutableStateOf<TransactionEntity?>(null) }
@@ -223,6 +245,23 @@ private fun MainShell(
         editing = transaction
         showEditor = true
         onEditConsumed()
+    }
+
+    val parseInput: (String) -> Unit = { transcript ->
+        if (settings.aiEnabled && settings.aiKeyConfigured) {
+            aiParsingText = transcript
+            viewModel.parseTextWithAi(transcript, ui.categories) { result ->
+                aiParsingText = null
+                voiceDrafts = result.getOrElse {
+                    aiParseError = "AI 解析失败，已改用本地规则：${it.message ?: "请检查网络、模型和 Key"}"
+                    VoiceEntryParser.parseAll(transcript, ui.categories)
+                }
+                voiceDraftIndex = 0
+            }
+        } else {
+            voiceDrafts = VoiceEntryParser.parseAll(transcript, ui.categories)
+            voiceDraftIndex = 0
+        }
     }
 
     Scaffold(
@@ -281,7 +320,7 @@ private fun MainShell(
                     onOpenFilters = { showFilters = true },
                     onPreviousMonth = viewModel::previousMonth,
                     onNextMonth = viewModel::nextMonth,
-                    onAdd = { editing = null; showEditor = true },
+                    onAdd = { showAddOptions = true },
                     onOpen = { editing = it; showEditor = true },
                     modifier = screenModifier
                 )
@@ -327,6 +366,69 @@ private fun MainShell(
             },
             onRefund = editing?.takeIf { it.direction == Direction.EXPENSE.name && it.status != TransactionStatus.FULLY_REFUNDED.name }?.let { tx ->
                 { showEditor = false; refunding = tx }
+            }
+        )
+    }
+    if (showAddOptions) {
+        AddTransactionChoiceDialog(
+            onDismiss = { showAddOptions = false },
+            onManual = { showAddOptions = false; editing = null; showEditor = true },
+            onVoice = { showAddOptions = false; showVoiceInput = true },
+            onText = { showAddOptions = false; showTextInput = true }
+        )
+    }
+    if (showVoiceInput) {
+        OfflineVoiceInputSheet(
+            onDismiss = { showVoiceInput = false },
+            onManual = { showVoiceInput = false; editing = null; showEditor = true },
+            onTranscript = { transcript ->
+                showVoiceInput = false
+                parseInput(transcript)
+            }
+        )
+    }
+    if (showTextInput) {
+        TextInputSheet(onDismiss = { showTextInput = false }, onSubmit = { text -> showTextInput = false; parseInput(text) })
+    }
+    aiParsingText?.let {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("正在解析账单") },
+            text = { Text("仅发送本次输入文本和当前分类给你已选择的 AI 服务，不会读取或发送历史账单。") },
+            confirmButton = {}
+        )
+    }
+    aiParseError?.let { message ->
+        AlertDialog(onDismissRequest = { aiParseError = null }, title = { Text("AI 文本解析未完成") }, text = { Text(message) }, confirmButton = { Button(onClick = { aiParseError = null }) { Text("知道了") } })
+    }
+    voiceDrafts.getOrNull(voiceDraftIndex)?.let { draft ->
+        VoiceConfirmationSheet(
+            draft = draft,
+            categories = ui.categories.filterNot { it.hidden },
+            position = voiceDraftIndex + 1,
+            total = voiceDrafts.size,
+            saving = savingVoiceDrafts,
+            saveError = voiceSaveError,
+            onDismiss = { if (!savingVoiceDrafts) { voiceDrafts = emptyList(); voiceDraftIndex = 0; voiceSaveError = null } },
+            onRetry = { if (!savingVoiceDrafts) { voiceDrafts = emptyList(); voiceDraftIndex = 0; voiceSaveError = null; showVoiceInput = true } },
+            onPrevious = { if (!savingVoiceDrafts && voiceDraftIndex > 0) voiceDraftIndex -= 1 },
+            onUpdate = { updated ->
+                voiceDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
+            },
+            onNext = { if (!savingVoiceDrafts && voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1 },
+            onSaveAll = { updated ->
+                if (!savingVoiceDrafts) {
+                    val finalDrafts = voiceDrafts.mapIndexed { index, value -> if (index == voiceDraftIndex) updated else value }
+                    voiceDrafts = finalDrafts
+                    voiceSaveError = null
+                    savingVoiceDrafts = true
+                    scope.launch {
+                        runCatching { viewModel.saveVoiceTransactions(finalDrafts) }
+                            .onSuccess { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
+                            .onFailure { voiceSaveError = "保存失败，草稿仍保留：${it.message ?: "请重试"}" }
+                        savingVoiceDrafts = false
+                    }
+                }
             }
         )
     }
@@ -591,6 +693,7 @@ private fun platformFilterLabel(value: String): String = when (value) {
 private fun sourceFilterLabel(value: String): String = when (value) {
     TransactionSource.AUTO.name -> "自动识别"
     TransactionSource.MANUAL.name -> "手动记录"
+    TransactionSource.VOICE.name -> "语音输入"
     else -> "导入"
 }
 
@@ -672,6 +775,238 @@ private fun TransactionRow(row: TransactionWithCategory, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun AddTransactionChoiceDialog(onDismiss: () -> Unit, onManual: () -> Unit, onVoice: () -> Unit, onText: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新增账单") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("语音输入仅使用设备本地普通话识别。文本输入可按设置使用 AI 或纯本地规则解析，均需逐笔确认后才会入账。")
+                Button(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("手动输入") }
+                OutlinedButton(onClick = onVoice, modifier = Modifier.fillMaxWidth()) { Text("语音输入") }
+                OutlinedButton(onClick = onText, modifier = Modifier.fillMaxWidth()) { Text("文本输入") }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TextInputSheet(onDismiss: () -> Unit, onSubmit: (String) -> Unit) {
+    var text by remember { mutableStateOf("") }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text("文本记账", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("可一次输入多笔，例如“吃饭 35 元，买日用品 20 元，网购 88 元”。AI 开启时仅发送本次文本和当前分类；关闭时只用本地规则。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+            OutlinedTextField(text, { text = it.take(1_000) }, label = { Text("输入消费或收入描述") }, minLines = 4, modifier = Modifier.fillMaxWidth().padding(top = 16.dp))
+            Button(onClick = { if (text.isNotBlank()) onSubmit(text.trim()) }, enabled = text.isNotBlank(), modifier = Modifier.fillMaxWidth().padding(top = 12.dp).height(52.dp)) { Text("解析并确认") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, onTranscript: (String) -> Unit) {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf("等待说话") }
+    var transcript by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var listening by remember { mutableStateOf(false) }
+    var showImeFallback by remember { mutableStateOf(false) }
+    val offlineAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) error = null else error = "未获得麦克风权限。你仍可使用手动输入。"
+    }
+
+    val recognizer = remember(offlineAvailable) {
+        if (offlineAvailable) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else null
+    }
+    DisposableEffect(recognizer) {
+        onDispose { recognizer?.destroy() }
+    }
+    fun beginListening() {
+        if (!offlineAvailable) {
+            error = "当前设备不支持离线普通话语音输入，请安装或启用本地中文语音包，或改用手动输入。"
+            showImeFallback = true
+            return
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        recognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: android.os.Bundle?) { status = "正在聆听"; error = null; listening = true }
+            override fun onBeginningOfSpeech() { status = "正在聆听" }
+            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onBufferReceived(buffer: ByteArray?) = Unit
+            override fun onEndOfSpeech() { status = "正在识别"; listening = false }
+            override fun onError(errorCode: Int) {
+                listening = false
+                status = "等待说话"
+                error = if (errorCode == SpeechRecognizer.ERROR_NO_MATCH || errorCode == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) "没有识别到有效内容，请重新说一次。" else "本地语音识别失败，请重新录入或使用手动输入。"
+            }
+            override fun onResults(results: android.os.Bundle?) {
+                listening = false
+                transcript = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                status = if (transcript.isBlank()) "等待说话" else "识别完成"
+                if (transcript.isBlank()) error = "没有识别到有效内容，请重新说一次。"
+            }
+            override fun onPartialResults(partialResults: android.os.Bundle?) {
+                transcript = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+            }
+            override fun onEvent(eventType: Int, params: android.os.Bundle?) = Unit
+        })
+        transcript = ""
+        status = "正在聆听"
+        recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        })
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).imePadding()) {
+            Text("语音输入", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                transcript,
+                { transcript = it.take(240); error = null },
+                label = { Text("识别到的文字") },
+                supportingText = { Text("可直接修改后再进入确认") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth()
+            )
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { if (listening) recognizer?.stopListening() else beginListening() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Text(if (listening) "结束录音" else "开始语音输入")
+            }
+            if (transcript.isNotBlank()) OutlinedButton(onClick = { onTranscript(transcript) }, modifier = Modifier.fillMaxWidth()) { Text("解析并确认") }
+            TextButton(onClick = { transcript = ""; error = null; status = "等待说话" }, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
+            TextButton(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("改用手动输入") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
+    if (showImeFallback) {
+        AlertDialog(
+            onDismissRequest = { showImeFallback = false },
+            title = { Text("需要本地普通话语言包") },
+            text = { Text("当前设备未检测到系统本地普通话识别。安装或启用本地中文语言包后可使用“开始语音输入”。\n\n你也可以关闭此提示，点击“识别到的文字”输入框，再使用输入法的麦克风填写文字。输入法语音是否离线由输入法决定。") },
+            confirmButton = { Button(onClick = { showImeFallback = false }) { Text("使用输入法语音填写") } },
+            dismissButton = { TextButton(onClick = { showImeFallback = false }) { Text("取消") } }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VoiceConfirmationSheet(
+    draft: VoiceDraft,
+    categories: List<CategoryEntity>,
+    position: Int,
+    total: Int,
+    saving: Boolean,
+    saveError: String?,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onPrevious: () -> Unit,
+    onUpdate: (VoiceDraft) -> Unit,
+    onNext: () -> Unit,
+    onSaveAll: (VoiceDraft) -> Unit
+) {
+    var amount by remember(draft) { mutableStateOf(draft.amountMinor?.let { "%.2f".format(Locale.ROOT, it / 100.0) }.orEmpty()) }
+    var merchant by remember(draft) { mutableStateOf(draft.merchant.orEmpty()) }
+    var note by remember(draft) { mutableStateOf(draft.note.orEmpty()) }
+    var direction by remember(draft) { mutableStateOf(draft.direction) }
+    var categoryId by remember(draft, categories) { mutableStateOf(draft.categoryIds.singleOrNull().orEmpty()) }
+    var needsCategoryChoice by remember(draft) { mutableStateOf(draft.categoryIds.size != 1) }
+    var occurredAt by remember(draft) { mutableStateOf(draft.occurredAt) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var error by remember(draft) { mutableStateOf(if (draft.amountMinor == null) "没有识别到金额，请手动补充。" else if (draft.categoryIds.isEmpty()) "没有识别到分类，请手动选择。" else if (draft.categoryIds.size > 1) "识别到多个可能分类，请选择。" else null) }
+    var horizontalDrag by remember(draft) { mutableFloatStateOf(0f) }
+    val dateText = remember(occurredAt) { SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(Date(occurredAt)) }
+
+    fun revisedDraft(): VoiceDraft? {
+        val minor = parseAmountMinor(amount)
+        error = when {
+            minor == null || minor <= 0 -> "请输入大于 0、最多两位小数的金额"
+            categoryId.isBlank() || needsCategoryChoice -> "请选择分类"
+            else -> null
+        }
+        return if (error == null) draft.copy(
+            amountMinor = minor,
+            direction = direction,
+            merchant = merchant.trim().ifBlank { null },
+            categoryIds = listOf(categoryId),
+            occurredAt = occurredAt,
+            note = note.trim().ifBlank { null }
+        ) else null
+    }
+    fun goNext() {
+        if (!saving) revisedDraft()?.let { updated ->
+            onUpdate(updated)
+            if (position < total) onNext() else onSaveAll(updated)
+        }
+    }
+    fun goPrevious() { if (!saving) revisedDraft()?.let { updated -> onUpdate(updated); onPrevious() } }
+
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)
+                .pointerInput(draft, position, total) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { horizontalDrag = 0f },
+                        onHorizontalDrag = { _, delta -> horizontalDrag += delta },
+                        onDragEnd = {
+                            when {
+                                horizontalDrag <= -72f && position < total -> goNext()
+                                horizontalDrag >= 72f && position > 1 -> goPrevious()
+                            }
+                        }
+                    )
+                }
+        ) {
+            Text("请确认这笔账单", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            if (total > 1) Text("第 $position / $total 笔 · 左右滑动可切换，编辑内容会保留", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("刚才识别为：“${draft.rawText}”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = direction == Direction.EXPENSE, onClick = { direction = Direction.EXPENSE }, label = { Text("支出") })
+                FilterChip(selected = direction == Direction.INCOME, onClick = { direction = Direction.INCOME }, label = { Text("收入") })
+            }
+            OutlinedTextField(amount, { amount = it.filter { c -> c.isDigit() || c == '.' }.take(12); error = null }, label = { Text("金额") }, prefix = { Text("¥ ") }, singleLine = true, isError = error?.contains("金额") == true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            Text("分类", style = MaterialTheme.typography.labelLarge)
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                categories.forEach { category -> FilterChip(selected = categoryId == category.id, onClick = { categoryId = category.id; needsCategoryChoice = false; error = null }, label = { Text("${category.icon} ${category.name}") }) }
+            }
+            OutlinedTextField(note, { note = it.take(100) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("日期：$dateText") }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            saveError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            Button(onClick = { goNext() }, enabled = !saving, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text(if (saving) "正在保存…" else if (position == total) "保存全部 $total 笔账单" else "确认并查看下一笔") }
+            if (position > 1) OutlinedButton(onClick = { goPrevious() }, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("返回上一笔") }
+            OutlinedButton(onClick = onRetry, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
+            TextButton(onClick = onDismiss, enabled = !saving, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = pickerMillisForLocalDate(occurredAt))
+        DatePickerDialog(onDismissRequest = { showDatePicker = false }, confirmButton = {
+            TextButton(onClick = { pickerState.selectedDateMillis?.let { occurredAt = localDayBoundsFromPicker(it).first }; showDatePicker = false }) { Text("确定") }
+        }, dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } }) { DatePicker(state = pickerState) }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TransactionEditorSheet(
@@ -713,7 +1048,7 @@ private fun TransactionEditorSheet(
             }
             OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(note, { note = it.take(100) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().clickable { include = !include }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(include, { include = it }); Text("计入统计")
             }
@@ -891,6 +1226,7 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
     var showBackupWarning by remember { mutableStateOf(false) }
     var showCategories by remember { mutableStateOf(false) }
     var showRules by remember { mutableStateOf(false) }
+    var showAiSettings by remember { mutableStateOf(false) }
     var accessibilityEnabled by remember { mutableStateOf(false) }
     var notificationEnabled by remember { mutableStateOf(false) }
     val backupLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let { viewModel.writeBackup(context.contentResolver, it) } }
@@ -936,6 +1272,18 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
         item { SectionTitle("账本") }
         item { SettingRow(Icons.Outlined.Category, "分类管理", "新增分类或隐藏不常用分类") { showCategories = true } }
         item { SettingRow(Icons.AutoMirrored.Outlined.Rule, "商户分类规则", if (rules.isEmpty()) "未设置规则" else "${rules.count { it.enabled }} 条启用 · 共 ${rules.size} 条") { showRules = true } }
+        item { SectionTitle("AI 文本解析") }
+        item {
+            SettingRow(
+                Icons.Outlined.AutoGraph,
+                "AI 文本解析",
+                when {
+                    settings.aiEnabled && settings.aiKeyConfigured -> "已启用 · ${settings.aiProvider}"
+                    settings.aiKeyConfigured -> "已配置，当前关闭"
+                    else -> "默认关闭 · 可接入自己的 API Key"
+                }
+            ) { showAiSettings = true }
+        }
         item { SettingRow(Icons.Outlined.AccountBalanceWallet, "预算", budgets.firstOrNull { it.categoryId == null }?.let { "总预算 ${money(it.limitMinor)} · ${budgets.size - 1} 个分类预算" } ?: "未设置") { showBudget = true } }
         item { SectionTitle("数据") }
         item { SettingRow(Icons.Outlined.Backup, "创建完整备份", "未加密，请妥善保管") { showBackupWarning = true } }
@@ -1010,6 +1358,79 @@ private fun ProfileScreen(viewModel: MojiViewModel, modifier: Modifier = Modifie
             onEnabled = viewModel::setRuleEnabled,
             onDelete = viewModel::deleteRule
         )
+    }
+    if (showAiSettings) {
+        AiTextParserSettingsSheet(
+            settings = settings,
+            onDismiss = { showAiSettings = false },
+            onSave = viewModel::saveAiSettings
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AiTextParserSettingsSheet(
+    settings: com.moji.app.settings.UserSettings,
+    onDismiss: () -> Unit,
+    onSave: (Boolean, AiProvider, String, String, String, Boolean, (Result<Unit>) -> Unit) -> Unit
+) {
+    var enabled by remember(settings) { mutableStateOf(settings.aiEnabled) }
+    var provider by remember(settings) { mutableStateOf(runCatching { AiProvider.valueOf(settings.aiProvider) }.getOrDefault(AiProvider.DEEPSEEK)) }
+    var baseUrl by remember(settings) { mutableStateOf(settings.aiBaseUrl) }
+    var model by remember(settings) { mutableStateOf(settings.aiModel) }
+    var apiKey by remember { mutableStateOf("") }
+    var clearKey by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text("AI 文本解析", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("默认关闭。开启后，仅将本次语音转写文本和当前可用分类发送给你选择的服务商；不会发送历史账单、备份或已有分类规则。AI 只能生成待确认草稿，不能修改已保存账单或分类。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+            SwitchSettingRow(
+                icon = Icons.Outlined.AutoGraph,
+                title = "启用 AI 文本解析",
+                subtitle = if (settings.aiKeyConfigured && !clearKey) "仅在语音转写完成后调用" else "请先填写并保存 API Key",
+                checked = enabled,
+                onCheckedChange = { enabled = it }
+            )
+            Text("服务商", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 12.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AiProvider.entries.forEach { option ->
+                    FilterChip(selected = provider == option, onClick = {
+                        provider = option
+                        if (option != AiProvider.CUSTOM) { baseUrl = option.baseUrl; model = option.defaultModel }
+                    }, label = { Text(option.label) })
+                }
+            }
+            OutlinedTextField(baseUrl, { baseUrl = it.take(200) }, label = { Text("OpenAI 兼容接口地址") }, supportingText = { Text("仅允许 HTTPS；会自动追加 /chat/completions") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(model, { model = it.take(100) }, label = { Text("模型名称") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                apiKey,
+                { apiKey = it.take(500); clearKey = false },
+                label = { Text(if (settings.aiKeyConfigured && !clearKey) "API Key（已保存；留空则不修改）" else "API Key（支持长按粘贴）") },
+                visualTransformation = PasswordVisualTransformation(),
+                // Password inputType makes some OEM keyboards enter a secure mode that blocks clipboard paste.
+                // Keep the visual mask, but request a normal text editor so a long API Key can be pasted.
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text),
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            if (settings.aiKeyConfigured) {
+                Row(Modifier.fillMaxWidth().clickable { clearKey = !clearKey }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = clearKey, onCheckedChange = { clearKey = it })
+                    Text("删除本机已保存的 API Key", style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+            error?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = 8.dp)) }
+            Button(onClick = {
+                onSave(enabled, provider, baseUrl, model, apiKey, clearKey) { result ->
+                    result.onSuccess { onDismiss() }.onFailure { error = it.message ?: "保存失败" }
+                }
+            }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("保存设置") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
     }
 }
 
