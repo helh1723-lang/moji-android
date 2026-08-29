@@ -719,7 +719,7 @@ private fun AddTransactionChoiceDialog(onDismiss: () -> Unit, onManual: () -> Un
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("新增账单") },
-        text = { Text("选择录入方式。语音输入只使用设备本地普通话识别，不会上传录音或文字。") },
+        text = { Text("选择录入方式。语音输入仅使用设备本地普通话识别，不会上传录音或文字。") },
         confirmButton = { Button(onClick = onVoice) { Text("语音输入") } },
         dismissButton = { TextButton(onClick = onManual) { Text("手动输入") } }
     )
@@ -737,6 +737,7 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) error = null else error = "未获得麦克风权限。你仍可使用手动输入。"
     }
+
     val recognizer = remember(offlineAvailable) {
         if (offlineAvailable) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else null
     }
@@ -745,7 +746,7 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
     }
     fun beginListening() {
         if (!offlineAvailable) {
-            error = "当前设备不支持离线普通话语音输入，请使用手动记账，或安装/启用本地中文语音包。"
+            error = "当前设备不支持离线普通话语音输入，请安装或启用本地中文语音包，或改用手动输入。"
             return
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -789,7 +790,14 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
             Spacer(Modifier.height(12.dp))
             Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(12.dp))
-            OutlinedTextField(transcript, {}, readOnly = true, label = { Text("识别到的文字") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(
+                transcript,
+                { transcript = it.take(240); error = null },
+                label = { Text("识别到的文字") },
+                supportingText = { Text("可直接修改后再进入确认") },
+                minLines = 2,
+                modifier = Modifier.fillMaxWidth()
+            )
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
             Spacer(Modifier.height(16.dp))
             Button(onClick = { if (listening) recognizer?.stopListening() else beginListening() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
