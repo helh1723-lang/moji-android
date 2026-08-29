@@ -1,7 +1,6 @@
 package com.moji.app.data
 
 import kotlinx.coroutines.flow.Flow
-import androidx.room.withTransaction
 import com.moji.app.voice.VoiceDraft
 import java.text.Normalizer
 import java.util.UUID
@@ -75,22 +74,26 @@ class MojiRepository(private val database: MojiDatabase) {
     }
 
     /** Multi-bill confirmation stays in memory until the final save, then commits as one Room transaction. */
-    suspend fun saveVoiceTransactions(drafts: List<VoiceDraft>) = database.withTransaction {
+    suspend fun saveVoiceTransactions(drafts: List<VoiceDraft>) {
         require(drafts.isNotEmpty()) { "没有待保存账单" }
-        drafts.forEach { draft ->
+        val now = System.currentTimeMillis()
+        val transactions = drafts.map { draft ->
             val categoryId = draft.categoryIds.singleOrNull() ?: error("请先为每笔账单选择一个分类")
             val amount = draft.amountMinor ?: error("请先补充每笔账单金额")
-            saveTransaction(
+            TransactionEntity(
                 amountMinor = amount,
-                direction = draft.direction,
-                merchant = draft.merchant,
+                direction = draft.direction.name,
+                merchantRaw = draft.merchant?.trim()?.takeIf { it.isNotEmpty() },
+                merchantNormalized = normalizeMerchant(draft.merchant),
                 categoryId = categoryId,
                 occurredAt = draft.occurredAt,
                 note = draft.note,
-                createMerchantRule = false,
-                source = TransactionSource.VOICE
+                source = TransactionSource.VOICE.name,
+                createdAt = now,
+                updatedAt = now
             )
         }
+        dao.insertTransactionsAtomically(transactions)
     }
 
     suspend fun softDelete(id: String) = dao.softDelete(id, System.currentTimeMillis())
