@@ -164,9 +164,23 @@ class MojiViewModel(
 
     fun saveTransaction(
         existingId: String?, amountMinor: Long, direction: Direction, merchant: String?,
-        categoryId: String, occurredAt: Long, note: String?, includeInStats: Boolean, createMerchantRule: Boolean
+        categoryId: String, occurredAt: Long, note: String?, includeInStats: Boolean, createMerchantRule: Boolean,
+        source: TransactionSource = TransactionSource.MANUAL
     ) = viewModelScope.launch {
-        repository.saveTransaction(existingId, amountMinor, direction, merchant, categoryId, occurredAt, note, includeInStats, createMerchantRule)
+        repository.saveTransaction(existingId, amountMinor, direction, merchant, categoryId, occurredAt, note, includeInStats, createMerchantRule, source)
+    }
+
+    fun saveVoiceTransaction(
+        amountMinor: Long, direction: Direction, merchant: String?, categoryId: String,
+        occurredAt: Long, note: String?, onComplete: (Result<Unit>) -> Unit
+    ) = viewModelScope.launch {
+        onComplete(runCatching {
+            repository.saveTransaction(
+                amountMinor = amountMinor, direction = direction, merchant = merchant,
+                categoryId = categoryId, occurredAt = occurredAt, note = note,
+                createMerchantRule = false, source = TransactionSource.VOICE
+            )
+        })
     }
 
     fun deleteTransaction(id: String) = viewModelScope.launch { repository.softDelete(id) }

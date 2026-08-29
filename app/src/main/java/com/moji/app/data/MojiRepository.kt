@@ -39,7 +39,8 @@ class MojiRepository(private val database: MojiDatabase) {
         occurredAt: Long,
         note: String?,
         includeInStats: Boolean = true,
-        createMerchantRule: Boolean = false
+        createMerchantRule: Boolean = false,
+        source: TransactionSource = TransactionSource.MANUAL
     ) {
         require(amountMinor > 0)
         val existing = existingId?.let { dao.transactionById(it) }
@@ -57,6 +58,7 @@ class MojiRepository(private val database: MojiDatabase) {
             occurredAt = occurredAt,
             note = note?.trim()?.takeIf { it.isNotEmpty() },
             includeInStats = includeInStats,
+            source = if (existing == null) source.name else existing.source,
             updatedAt = now
         )
         if (existing == null) dao.insertTransaction(transaction) else dao.updateTransaction(transaction)

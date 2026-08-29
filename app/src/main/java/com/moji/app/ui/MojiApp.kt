@@ -1,7 +1,13 @@
 package com.moji.app.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -85,6 +91,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -114,6 +121,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
 import com.moji.app.data.CategoryEntity
 import com.moji.app.data.Direction
 import com.moji.app.data.MerchantRuleEntity
@@ -123,6 +131,8 @@ import com.moji.app.data.TransactionCandidateEntity
 import com.moji.app.data.TransactionSource
 import com.moji.app.data.TransactionWithCategory
 import com.moji.app.data.TransactionStatus
+import com.moji.app.voice.VoiceDraft
+import com.moji.app.voice.VoiceEntryParser
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -206,6 +216,9 @@ private fun MainShell(
     var tab by rememberSaveable { mutableStateOf(MainTab.LEDGER) }
     var editing by remember { mutableStateOf<TransactionEntity?>(null) }
     var showEditor by rememberSaveable { mutableStateOf(false) }
+    var showAddOptions by rememberSaveable { mutableStateOf(false) }
+    var showVoiceInput by rememberSaveable { mutableStateOf(false) }
+    var voiceDraft by remember { mutableStateOf<VoiceDraft?>(null) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var refunding by remember { mutableStateOf<TransactionEntity?>(null) }
@@ -281,7 +294,7 @@ private fun MainShell(
                     onOpenFilters = { showFilters = true },
                     onPreviousMonth = viewModel::previousMonth,
                     onNextMonth = viewModel::nextMonth,
-                    onAdd = { editing = null; showEditor = true },
+                    onAdd = { showAddOptions = true },
                     onOpen = { editing = it; showEditor = true },
                     modifier = screenModifier
                 )
@@ -327,6 +340,34 @@ private fun MainShell(
             },
             onRefund = editing?.takeIf { it.direction == Direction.EXPENSE.name && it.status != TransactionStatus.FULLY_REFUNDED.name }?.let { tx ->
                 { showEditor = false; refunding = tx }
+            }
+        )
+    }
+    if (showAddOptions) {
+        AddTransactionChoiceDialog(
+            onDismiss = { showAddOptions = false },
+            onManual = { showAddOptions = false; editing = null; showEditor = true },
+            onVoice = { showAddOptions = false; showVoiceInput = true }
+        )
+    }
+    if (showVoiceInput) {
+        OfflineVoiceInputSheet(
+            onDismiss = { showVoiceInput = false },
+            onManual = { showVoiceInput = false; editing = null; showEditor = true },
+            onTranscript = { transcript ->
+                showVoiceInput = false
+                voiceDraft = VoiceEntryParser.parse(transcript, ui.categories)
+            }
+        )
+    }
+    voiceDraft?.let { draft ->
+        VoiceConfirmationSheet(
+            draft = draft,
+            categories = ui.categories.filterNot { it.hidden },
+            onDismiss = { voiceDraft = null },
+            onRetry = { voiceDraft = null; showVoiceInput = true },
+            onSave = { amount, direction, merchant, categoryId, occurredAt, note, complete ->
+                viewModel.saveVoiceTransaction(amount, direction, merchant, categoryId, occurredAt, note, complete)
             }
         )
     }
@@ -591,6 +632,7 @@ private fun platformFilterLabel(value: String): String = when (value) {
 private fun sourceFilterLabel(value: String): String = when (value) {
     TransactionSource.AUTO.name -> "自动识别"
     TransactionSource.MANUAL.name -> "手动记录"
+    TransactionSource.VOICE.name -> "语音输入"
     else -> "导入"
 }
 
@@ -672,6 +714,157 @@ private fun TransactionRow(row: TransactionWithCategory, onClick: () -> Unit) {
     }
 }
 
+@Composable
+private fun AddTransactionChoiceDialog(onDismiss: () -> Unit, onManual: () -> Unit, onVoice: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新增账单") },
+        text = { Text("选择录入方式。语音输入只使用设备本地普通话识别，不会上传录音或文字。") },
+        confirmButton = { Button(onClick = onVoice) { Text("语音输入") } },
+        dismissButton = { TextButton(onClick = onManual) { Text("手动输入") } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, onTranscript: (String) -> Unit) {
+    val context = LocalContext.current
+    var status by remember { mutableStateOf("等待说话") }
+    var transcript by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+    var listening by remember { mutableStateOf(false) }
+    val offlineAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) error = null else error = "未获得麦克风权限。你仍可使用手动输入。"
+    }
+    val recognizer = remember(offlineAvailable) {
+        if (offlineAvailable) SpeechRecognizer.createOnDeviceSpeechRecognizer(context) else null
+    }
+    DisposableEffect(recognizer) {
+        onDispose { recognizer?.destroy() }
+    }
+    fun beginListening() {
+        if (!offlineAvailable) {
+            error = "当前设备不支持离线普通话语音输入，请使用手动记账，或安装/启用本地中文语音包。"
+            return
+        }
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        recognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: android.os.Bundle?) { status = "正在聆听"; error = null; listening = true }
+            override fun onBeginningOfSpeech() { status = "正在聆听" }
+            override fun onRmsChanged(rmsdB: Float) = Unit
+            override fun onBufferReceived(buffer: ByteArray?) = Unit
+            override fun onEndOfSpeech() { status = "正在识别"; listening = false }
+            override fun onError(errorCode: Int) {
+                listening = false
+                status = "等待说话"
+                error = if (errorCode == SpeechRecognizer.ERROR_NO_MATCH || errorCode == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) "没有识别到有效内容，请重新说一次。" else "本地语音识别失败，请重新录入或使用手动输入。"
+            }
+            override fun onResults(results: android.os.Bundle?) {
+                listening = false
+                transcript = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+                status = if (transcript.isBlank()) "等待说话" else "识别完成"
+                if (transcript.isBlank()) error = "没有识别到有效内容，请重新说一次。"
+            }
+            override fun onPartialResults(partialResults: android.os.Bundle?) {
+                transcript = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
+            }
+            override fun onEvent(eventType: Int, params: android.os.Bundle?) = Unit
+        })
+        transcript = ""
+        status = "正在聆听"
+        recognizer?.startListening(Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
+            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        })
+    }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp).imePadding()) {
+            Text("语音输入", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(12.dp))
+            Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(transcript, {}, readOnly = true, label = { Text("识别到的文字") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            Spacer(Modifier.height(16.dp))
+            Button(onClick = { if (listening) recognizer?.stopListening() else beginListening() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                Text(if (listening) "结束录音" else "开始语音输入")
+            }
+            if (transcript.isNotBlank()) OutlinedButton(onClick = { onTranscript(transcript) }, modifier = Modifier.fillMaxWidth()) { Text("进入确认") }
+            TextButton(onClick = { transcript = ""; error = null; status = "等待说话" }, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
+            TextButton(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("改用手动输入") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun VoiceConfirmationSheet(
+    draft: VoiceDraft,
+    categories: List<CategoryEntity>,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+    onSave: (Long, Direction, String?, String, Long, String?, (Result<Unit>) -> Unit) -> Unit
+) {
+    var amount by remember(draft) { mutableStateOf(draft.amountMinor?.let { "%.2f".format(Locale.ROOT, it / 100.0) }.orEmpty()) }
+    var merchant by remember(draft) { mutableStateOf("") }
+    var note by remember(draft) { mutableStateOf(draft.note.orEmpty()) }
+    var direction by remember(draft) { mutableStateOf(draft.direction) }
+    var categoryId by remember(draft, categories) { mutableStateOf(draft.categoryIds.singleOrNull().orEmpty()) }
+    var needsCategoryChoice by remember(draft) { mutableStateOf(draft.categoryIds.size != 1) }
+    var occurredAt by remember(draft) { mutableStateOf(draft.occurredAt) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var error by remember(draft) { mutableStateOf(if (draft.amountMinor == null) "没有识别到金额，请手动补充。" else if (draft.categoryIds.isEmpty()) "没有识别到分类，请手动选择。" else if (draft.categoryIds.size > 1) "识别到多个可能分类，请选择。" else null) }
+    val dateText = remember(occurredAt) { SimpleDateFormat("yyyy年M月d日", Locale.CHINA).format(Date(occurredAt)) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
+            Text("请确认这笔账单", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            Text("刚才识别为：“${draft.rawText}”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(selected = direction == Direction.EXPENSE, onClick = { direction = Direction.EXPENSE }, label = { Text("支出") })
+                FilterChip(selected = direction == Direction.INCOME, onClick = { direction = Direction.INCOME }, label = { Text("收入") })
+            }
+            OutlinedTextField(amount, { amount = it.filter { c -> c.isDigit() || c == '.' }.take(12); error = null }, label = { Text("金额") }, prefix = { Text("¥ ") }, singleLine = true, isError = error?.contains("金额") == true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(12.dp))
+            Text("分类", style = MaterialTheme.typography.labelLarge)
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                categories.forEach { category -> FilterChip(selected = categoryId == category.id, onClick = { categoryId = category.id; needsCategoryChoice = false; error = null }, label = { Text("${category.icon} ${category.name}") }) }
+            }
+            OutlinedTextField(note, { note = it.take(100) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedButton(onClick = { showDatePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("日期：$dateText") }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
+            Button(onClick = {
+                val minor = parseAmountMinor(amount)
+                error = when {
+                    minor == null || minor <= 0 -> "请输入大于 0、最多两位小数的金额"
+                    categoryId.isBlank() || needsCategoryChoice -> "请选择分类"
+                    else -> null
+                }
+                if (error == null) onSave(minor!!, direction, merchant.trim().ifBlank { null }, categoryId, occurredAt, note.trim().ifBlank { null }) { result ->
+                    result.onSuccess { onDismiss() }.onFailure { error = "保存失败，请稍后重试。" }
+                }
+            }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("保存账单") }
+            OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
+            TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
+        }
+    }
+    if (showDatePicker) {
+        val pickerState = rememberDatePickerState(initialSelectedDateMillis = pickerMillisForLocalDate(occurredAt))
+        DatePickerDialog(onDismissRequest = { showDatePicker = false }, confirmButton = {
+            TextButton(onClick = { pickerState.selectedDateMillis?.let { occurredAt = localDayBoundsFromPicker(it).first }; showDatePicker = false }) { Text("确定") }
+        }, dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("取消") } }) { DatePicker(state = pickerState) }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TransactionEditorSheet(
@@ -713,7 +906,7 @@ private fun TransactionEditorSheet(
             }
             OutlinedTextField(merchant, { merchant = it.take(50) }, label = { Text("商户（可选）") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(note, { note = it.take(200) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(note, { note = it.take(100) }, label = { Text("备注（可选）") }, modifier = Modifier.fillMaxWidth())
             Row(Modifier.fillMaxWidth().clickable { include = !include }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(include, { include = it }); Text("计入统计")
             }
