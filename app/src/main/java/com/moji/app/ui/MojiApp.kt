@@ -218,7 +218,8 @@ private fun MainShell(
     var showEditor by rememberSaveable { mutableStateOf(false) }
     var showAddOptions by rememberSaveable { mutableStateOf(false) }
     var showVoiceInput by rememberSaveable { mutableStateOf(false) }
-    var voiceDraft by remember { mutableStateOf<VoiceDraft?>(null) }
+    var voiceDrafts by remember { mutableStateOf<List<VoiceDraft>>(emptyList()) }
+    var voiceDraftIndex by rememberSaveable { mutableIntStateOf(0) }
     var showSearch by rememberSaveable { mutableStateOf(false) }
     var showFilters by rememberSaveable { mutableStateOf(false) }
     var refunding by remember { mutableStateOf<TransactionEntity?>(null) }
@@ -356,16 +357,23 @@ private fun MainShell(
             onManual = { showVoiceInput = false; editing = null; showEditor = true },
             onTranscript = { transcript ->
                 showVoiceInput = false
-                voiceDraft = VoiceEntryParser.parse(transcript, ui.categories)
+                voiceDrafts = VoiceEntryParser.parseAll(transcript, ui.categories)
+                voiceDraftIndex = 0
             }
         )
     }
-    voiceDraft?.let { draft ->
+    voiceDrafts.getOrNull(voiceDraftIndex)?.let { draft ->
         VoiceConfirmationSheet(
             draft = draft,
             categories = ui.categories.filterNot { it.hidden },
-            onDismiss = { voiceDraft = null },
-            onRetry = { voiceDraft = null; showVoiceInput = true },
+            position = voiceDraftIndex + 1,
+            total = voiceDrafts.size,
+            onDismiss = { voiceDrafts = emptyList(); voiceDraftIndex = 0 },
+            onRetry = { voiceDrafts = emptyList(); voiceDraftIndex = 0; showVoiceInput = true },
+            onSaved = {
+                if (voiceDraftIndex + 1 < voiceDrafts.size) voiceDraftIndex += 1
+                else { voiceDrafts = emptyList(); voiceDraftIndex = 0 }
+            },
             onSave = { amount, direction, merchant, categoryId, occurredAt, note, complete ->
                 viewModel.saveVoiceTransaction(amount, direction, merchant, categoryId, occurredAt, note, complete)
             }
@@ -733,6 +741,7 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
     var transcript by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var listening by remember { mutableStateOf(false) }
+    var showImeFallback by remember { mutableStateOf(false) }
     val offlineAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) error = null else error = "未获得麦克风权限。你仍可使用手动输入。"
@@ -747,6 +756,7 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
     fun beginListening() {
         if (!offlineAvailable) {
             error = "当前设备不支持离线普通话语音输入，请安装或启用本地中文语音包，或改用手动输入。"
+            showImeFallback = true
             return
         }
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -803,11 +813,20 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
             Button(onClick = { if (listening) recognizer?.stopListening() else beginListening() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
                 Text(if (listening) "结束录音" else "开始语音输入")
             }
-            if (transcript.isNotBlank()) OutlinedButton(onClick = { onTranscript(transcript) }, modifier = Modifier.fillMaxWidth()) { Text("进入确认") }
+            if (transcript.isNotBlank()) OutlinedButton(onClick = { onTranscript(transcript) }, modifier = Modifier.fillMaxWidth()) { Text("解析并确认") }
             TextButton(onClick = { transcript = ""; error = null; status = "等待说话" }, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }
             TextButton(onClick = onManual, modifier = Modifier.fillMaxWidth()) { Text("改用手动输入") }
             TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("取消") }
         }
+    }
+    if (showImeFallback) {
+        AlertDialog(
+            onDismissRequest = { showImeFallback = false },
+            title = { Text("需要本地普通话语言包") },
+            text = { Text("当前设备未检测到系统本地普通话识别。安装或启用本地中文语言包后可使用“开始语音输入”。\n\n你也可以关闭此提示，点击“识别到的文字”输入框，再使用输入法的麦克风填写文字。输入法语音是否离线由输入法决定。") },
+            confirmButton = { Button(onClick = { showImeFallback = false }) { Text("使用输入法语音填写") } },
+            dismissButton = { TextButton(onClick = { showImeFallback = false }) { Text("取消") } }
+        )
     }
 }
 
@@ -816,8 +835,11 @@ private fun OfflineVoiceInputSheet(onDismiss: () -> Unit, onManual: () -> Unit, 
 private fun VoiceConfirmationSheet(
     draft: VoiceDraft,
     categories: List<CategoryEntity>,
+    position: Int,
+    total: Int,
     onDismiss: () -> Unit,
     onRetry: () -> Unit,
+    onSaved: () -> Unit,
     onSave: (Long, Direction, String?, String, Long, String?, (Result<Unit>) -> Unit) -> Unit
 ) {
     var amount by remember(draft) { mutableStateOf(draft.amountMinor?.let { "%.2f".format(Locale.ROOT, it / 100.0) }.orEmpty()) }
@@ -833,6 +855,7 @@ private fun VoiceConfirmationSheet(
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp)) {
             Text("请确认这笔账单", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
+            if (total > 1) Text("第 $position / $total 笔", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("刚才识别为：“${draft.rawText}”", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
             Spacer(Modifier.height(12.dp))
             Row(Modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -858,7 +881,7 @@ private fun VoiceConfirmationSheet(
                     else -> null
                 }
                 if (error == null) onSave(minor!!, direction, merchant.trim().ifBlank { null }, categoryId, occurredAt, note.trim().ifBlank { null }) { result ->
-                    result.onSuccess { onDismiss() }.onFailure { error = "保存失败，请稍后重试。" }
+                    result.onSuccess { onSaved() }.onFailure { error = "保存失败，请稍后重试。" }
                 }
             }, modifier = Modifier.fillMaxWidth().height(52.dp)) { Text("保存账单") }
             OutlinedButton(onClick = onRetry, modifier = Modifier.fillMaxWidth()) { Text("重新录入") }

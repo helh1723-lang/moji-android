@@ -13,6 +13,7 @@ class VoiceEntryParserTest {
         CategoryEntity("meal", name = "正餐", icon = "🍚", sortOrder = 0),
         CategoryEntity("delivery", name = "外卖", icon = "🥡", sortOrder = 1),
         CategoryEntity("coffee", name = "咖啡奶茶", icon = "☕", sortOrder = 2),
+        CategoryEntity("snack", name = "零食", icon = "🍪", sortOrder = 3),
         CategoryEntity("taxi", name = "打车", icon = "🚕", sortOrder = 3),
         CategoryEntity("daily", name = "日用品", icon = "🧻", sortOrder = 4),
         CategoryEntity("income", name = "收入", icon = "↑", sortOrder = 5)
@@ -41,5 +42,19 @@ class VoiceEntryParserTest {
         assertEquals(500000L, income.amountMinor)
         val date = Calendar.getInstance().apply { timeInMillis = income.occurredAt }
         assertEquals(Calendar.AUGUST, date.get(Calendar.MONTH)); assertEquals(20, date.get(Calendar.DAY_OF_MONTH))
+    }
+
+    @Test fun parsesMultipleBillsAndKeepsEachClauseCategory() {
+        val drafts = VoiceEntryParser.parseAll("今天吃饭花了35块，买零食花了10块", categories, now)
+        assertEquals(2, drafts.size)
+        assertEquals(3500L, drafts[0].amountMinor); assertEquals(listOf("meal"), drafts[0].categoryIds)
+        assertEquals(1000L, drafts[1].amountMinor); assertEquals(listOf("snack"), drafts[1].categoryIds)
+    }
+
+    @Test fun recognizesMilkTeaBrandsAndDeliveryPrecedence() {
+        val milkTea = VoiceEntryParser.parse("今天喝了一杯25的蜜雪冰城奶茶", categories, now)
+        assertEquals(2500L, milkTea.amountMinor); assertEquals(listOf("coffee"), milkTea.categoryIds)
+        val delivery = VoiceEntryParser.parse("点外卖喝奶茶花了25元", categories, now)
+        assertEquals(listOf("delivery"), delivery.categoryIds)
     }
 }
